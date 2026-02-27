@@ -343,21 +343,30 @@ async function saveImageToFile(dataUrl) {
     console.log('[IIG] saveImageToFile input type:', dataUrl?.substring(0, 50));
     
     // If it's a direct URL (not data:), download and convert
-    if (dataUrl && !dataUrl.startsWith('data:') && (dataUrl.startsWith('http://') || dataUrl.startsWith('https://'))) {
-        console.log('[IIG] Downloading image from URL...');
-        try {
-            const response = await fetch(dataUrl);
-            const blob = await response.blob();
-            const arrayBuffer = await blob.arrayBuffer();
-            const base64 = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));
-            const mimeType = blob.type || 'image/png';
-            dataUrl = `data:${mimeType};base64,${base64}`;
-            console.log('[IIG] Converted URL to data URL, size:', base64.length);
-        } catch (err) {
-            console.error('[IIG] Failed to download image:', err);
-            throw new Error('Failed to download image from URL');
-        }
+if (dataUrl && !dataUrl.startsWith('data:') && (dataUrl.startsWith('http://') || dataUrl.startsWith('https://'))) {
+    console.log('[IIG] Downloading image from URL...');
+    try {
+        const response = await fetch(dataUrl);
+        const blob = await response.blob();
+
+        // FIX: Использовать FileReader вместо spread на огромном массиве
+        const base64 = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onloadend = () => {
+                // reader.result уже в формате data:mime;base64,...
+                resolve(reader.result);
+            };
+            reader.onerror = reject;
+            reader.readAsDataURL(blob);
+        });
+
+        dataUrl = base64; // Уже data URL!
+        console.log('[IIG] Converted URL to data URL via FileReader');
+    } catch (err) {
+        console.error('[IIG] Failed to download image:', err);
+        throw new Error('Failed to download image from URL');
     }
+}
     
     // Extract base64 and format from data URL
     const match = dataUrl.match(/^data:image\/(\w+);base64,(.+)$/);
@@ -2498,6 +2507,7 @@ document.getElementById('iig_npc_add')?.addEventListener('click', () => {
     
     console.log('[IIG] Inline Image Generation extension initialized');
 })();
+
 
 
 
