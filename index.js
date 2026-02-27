@@ -66,13 +66,15 @@ const defaultSettings = Object.freeze({
     // Gemini/nano-banana specific
     aspectRatio: '1:1', // "1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"
     imageSize: '1K', // "1K", "2K", "4K"
-     // NPC References
+    // NPC References
+    // Array of { name: string, imageData: string|null, enabled: boolean }
+    // Reference is sent only when NPC name appears in the generation prompt
     npcReferences: [],
-    // Формат каждого элемента:
-    // { name: "Luca", imageData: "base64...", enabled: true }
+
     // Style References
+    // Array of { name: string, imageData: string }
+    // Sent with every generation when enabled, instructs model to copy visual style
     styleReferenceImages: [],
-    // Формат: [{ name: "manhwa style", imageData: "base64..." }]
     sendStyleReference: false,
 });
 
@@ -683,7 +685,12 @@ async function generateImageGemini(prompt, style, referenceImages = [], options 
         const refInstruction = `[CRITICAL: The reference image(s) above show the EXACT appearance of the character(s). You MUST precisely copy their: face structure, eye color, hair color and style, skin tone, body type, clothing, and all distinctive features. Do not deviate from the reference appearances.]`;
         fullPrompt = `${refInstruction}\n\n${fullPrompt}`;
     }
-    
+      // Style reference instruction
+    const settings = getSettings();
+    if (settings.sendStyleReference && settings.styleReferenceImages?.length > 0) {
+        const styleInstruction = `[STYLE REFERENCE: The reference image(s) show the desired visual STYLE. Match the art style, color palette, linework, rendering technique, and overall aesthetic from these references. Apply this style to all generated content.]`;
+        fullPrompt = `${styleInstruction}\n\n${fullPrompt}`;
+    }
     parts.push({ text: fullPrompt });
     
     console.log(`[IIG] Gemini request: ${referenceImages.length} reference image(s) + prompt (${fullPrompt.length} chars)`);
@@ -826,16 +833,25 @@ if (settings.npcReferences && settings.npcReferences.length > 0) {
     const promptLower = prompt.toLowerCase();
 
     for (const npc of settings.npcReferences) {
-        // Пропускаем выключенных и без картинки
+        // Skip those that are turned off and have no picture.
         if (!npc.enabled || !npc.imageData) continue;
 
-        // Проверяем: есть ли имя NPC в промпте?
+        // Check: is the NPC's name in the prompt?
         if (promptLower.includes(npc.name.toLowerCase())) {
             referenceImages.push(npc.imageData);
             console.log(`[IIG] NPC "${npc.name}" found in prompt, adding reference`);
         }
     }
+    // Style reference - always send when enabled
+if (settings.sendStyleReference && settings.styleReferenceImages?.length > 0) {
+    for (const styleRef of settings.styleReferenceImages) {
+        if (styleRef.imageData) {
+            referenceImages.push(styleRef.imageData);
+            console.log(`[IIG] Style reference "${styleRef.name}" added`);
+        }
+    }
 }
+
     console.log(`[IIG] Total reference images: ${referenceImages.length}`);
     
     // Add default style to the style parameter if set
@@ -1922,6 +1938,21 @@ function createSettingsUI() {
         <i class="fa-solid fa-plus"></i> Добавить
     </div>
 </div>
+<hr>
+<h5>Референс стиля</h5>
+<p class="hint">Загрузите картинку-пример стиля. Нанобанана будет копировать визуальный стиль с неё.</p>
+
+<label class="checkbox_label">
+    <input type="checkbox" id="iig_send_style_ref" ${settings.sendStyleReference ? 'checked' : ''}>
+    <span>Отправлять стилевой референс</span>
+</label>
+
+<div id="iig_style_ref_container" class="${!settings.sendStyleReference ? 'hidden' : ''}">
+    <div id="iig_style_ref_list"></div>
+    <div id="iig_style_ref_upload" class="menu_button" style="width:100%;margin-top:5px;">
+        <i class="fa-solid fa-palette"></i> Загрузить картинку стиля
+    </div>
+</div>
                     <hr>
                     
                     <!-- Опции для Nano-Banana -->
@@ -2177,7 +2208,7 @@ function bindSettingsEvents() {
         }
     });
     
-    // В bindSettingsEvents() добавить:
+    // В bindSettingsEvents() add:
 document.getElementById('iig_npc_add')?.addEventListener('click', () => {
     const nameInput = document.getElementById('iig_npc_new_name');
     const name = nameInput?.value?.trim();
@@ -2276,6 +2307,7 @@ document.getElementById('iig_npc_add')?.addEventListener('click', () => {
     
     console.log('[IIG] Inline Image Generation extension initialized');
 })();
+
 
 
 
