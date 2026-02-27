@@ -706,8 +706,15 @@ async function generateImageGemini(prompt, style, referenceImages = [], options 
         });
         // Add text label immediately after each image so model knows who it is
         parts.push({
-            text: `[Reference image ${idx + 1}: This is "${ref.label}". Memorize this exact appearance.]`
-        });
+    text: `[CHARACTER REFERENCE: "${ref.label}"]
+This image shows the EXACT appearance of a character named "${ref.label}".
+When "${ref.label}" appears in the prompt, you MUST draw them with:
+- This EXACT face (eye shape, nose, lips, jawline)
+- This EXACT hair (color, length, style, texture)
+- This EXACT skin tone
+- This EXACT body type and proportions
+Do NOT alter or "improve" their appearance. Copy it precisely.`
+});
     }
 
     // Add style reference images
@@ -719,9 +726,18 @@ async function generateImageGemini(prompt, style, referenceImages = [], options 
             }
         });
         const styleName = ref.label.replace('style:', '');
-        parts.push({
-            text: `[Style reference: "${styleName}". Copy this visual style, color palette, linework, and rendering technique.]`
-        });
+parts.push({
+    text: `[STYLE REFERENCE: "${styleName}"]
+This image defines the VISUAL STYLE for your output. You must replicate:
+- The art technique (digital painting, anime cel-shading, oil painting, etc.)
+- The color palette and saturation levels
+- The linework quality (soft, sharp, sketchy, clean)
+- The rendering style (realistic, stylized, flat, dimensional)
+- The lighting approach and mood
+- The level of detail and texture
+The CONTENT of this image is irrelevant. Only copy its ARTISTIC STYLE.
+Apply this style to whatever scene is described in the prompt.`
+});
     }
 
     // Build the main prompt
@@ -730,15 +746,59 @@ async function generateImageGemini(prompt, style, referenceImages = [], options 
     // Add character reference instruction if we have character refs
     if (characterRefs.length > 0) {
         const refList = characterRefs.map((r, i) => `  - Image ${i + 1} = "${r.label}"`).join('\n');
-        const refInstruction = [
-            `[CRITICAL CHARACTER CONSISTENCY INSTRUCTION]`,
-            `The reference images above show the EXACT appearance of specific characters:`,
-            refList,
-            ``,
-            `You MUST precisely replicate each character's: face structure, eye shape and color, hair color/style/length, skin tone, body proportions, and all distinguishing features.`,
-            `When a character name appears in the prompt below, draw them EXACTLY as shown in their reference image. Do NOT invent new appearances.`,
-            `[END INSTRUCTION]`,
-        ].join('\n');
+// Строим разные инструкции в зависимости от того, что есть
+let refInstruction = '';
+
+if (characterRefs.length > 0 && styleRefs.length > 0) {
+    // Есть и персонажи, и стиль
+    const charList = characterRefs.map((r, i) => `  - Image ${i + 1}: "${r.label}" (character)`).join('\n');
+    const styleList = styleRefs.map((r, i) => `  - Image ${characterRefs.length + i + 1}: "${r.label.replace('style:', '')}" (style)`).join('\n');
+
+    refInstruction = `[REFERENCE IMAGES PROVIDED]
+
+CHARACTER REFERENCES (copy their appearance exactly):
+${charList}
+
+STYLE REFERENCES (copy this artistic style):
+${styleList}
+
+INSTRUCTIONS:
+1. When a character name from the list appears in the prompt, draw them EXACTLY as shown in their reference image. Do not change their face, hair, or body.
+2. Apply the visual style from the style reference(s) to the entire image. This means using the same art technique, color palette, linework, and rendering approach.
+3. The style reference defines HOW to draw. The character references define WHO to draw. The prompt defines WHAT scene to draw.
+
+[END REFERENCES]
+
+`;
+} else if (characterRefs.length > 0) {
+    // Only chars
+    const charList = characterRefs.map((r, i) => `  - Image ${i + 1} = "${r.label}"`).join('\n');
+
+    refInstruction = `[CHARACTER REFERENCE IMAGES]
+The images above show the EXACT appearance of these characters:
+${charList}
+
+When any of these names appear in the prompt below, you MUST draw them with their EXACT appearance from the reference:
+- Same face structure, eye shape/color, nose, lips
+- Same hair color, length, style
+- Same skin tone
+- Same body type
+
+Do NOT invent new features or "improve" their look. Replicate precisely.
+[END REFERENCES]
+
+`;
+} else if (styleRefs.length > 0) {
+    // Only style
+    refInstruction = `[STYLE REFERENCE IMAGE]
+The image(s) above define the VISUAL STYLE you must use.
+Copy the art technique, color palette, linework, shading, and overall aesthetic.
+The content of the style reference is irrelevant — only replicate its artistic approach.
+Apply this style to the scene described in the prompt below.
+[END STYLE REFERENCE]
+
+`;
+}
         fullPrompt = `${refInstruction}\n\n${fullPrompt}`;
     }
 
@@ -2507,6 +2567,7 @@ document.getElementById('iig_npc_add')?.addEventListener('click', () => {
     
     console.log('[IIG] Inline Image Generation extension initialized');
 })();
+
 
 
 
