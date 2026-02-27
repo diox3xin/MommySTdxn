@@ -32,6 +32,22 @@ Image generation:
 - [SIZE]: Image resolution - "1K" (default), "2K", "4K" for higher quality.
 - Famous Characters: Use their names (e.g., Krul Tepes) and provide a detailed physical description.
 - Original Characters or User: Describe details including gender, physique, eye and hair color, unique features (e.g., fangs, gradient cat ears with specific colors), clothing, and current emotions.
+
+NPC CHARACTER NAMES IN PROMPTS:
+- When an NPC character appears in a scene that requires an image, you MUST include their EXACT NAME in the image prompt [DESC].
+- The image generation system uses character names to automatically attach reference images for visual consistency.
+- WRONG: "a tall man with dark hair standing in the doorway" (no name = no reference image sent)
+- CORRECT: "Luca, a tall man with dark hair, standing in the doorway of a dimly lit apartment" (name present = reference image will be sent automatically)
+- Always place the character's name at the BEGINNING of their description in the prompt.
+- If multiple named characters appear in one image, include ALL their names.
+- Still provide a full physical description alongside the name — the name triggers the reference image, but the description guides the composition.
+
+STYLE REFERENCE HANDLING:
+- A visual style reference image may be automatically attached to your generation request by the system.
+- When a style reference is active, focus your [STYLE] field on the MOOD and COMPOSITION rather than the art technique, since the reference image already communicates the visual style.
+- Example with style ref active: instead of [STYLE]: "detailed manhwa illustration with soft cel-shading and pastel tones", write [STYLE]: "intimate close-up, warm golden hour lighting, soft focus background" — because the manhwa look is already captured by the reference image.
+- You do NOT need to mention the style reference in your prompt. It is handled invisibly by the system.
+
 - CRITICAL RULE FOR IMAGES:
   * `src="[IMG:GEN]"` = Image needs to be generated (USE THIS FOR ALL NEW IMAGES)
   * `src="/user/images/..."` or any path in history = Image already exists, DO NOT COPY THIS
@@ -41,3 +57,4 @@ Image generation:
   * If you see an existing path in src, that's a COMPLETED image - make a NEW one with [IMG:GEN]
 {{setvar::largecothtml::
 - HTML Visuals: What additional HTML element could be added that would fit the story? Is the new element varied and different from those used previously?}}
+
