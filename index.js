@@ -1793,6 +1793,73 @@ function renderNpcList() {
 }
 
 /**
+ * Render style reference images list in settings UI
+ */
+function renderStyleRefList() {
+    const settings = getSettings();
+    const container = document.getElementById('iig_style_ref_list');
+    if (!container) return;
+
+    container.innerHTML = '';
+
+    if (!settings.styleReferenceImages || settings.styleReferenceImages.length === 0) {
+        container.innerHTML = '<p style="color:#5a5252;font-size:11px;">Нет загруженных стилей</p>';
+        return;
+    }
+
+    for (let i = 0; i < settings.styleReferenceImages.length; i++) {
+        const styleRef = settings.styleReferenceImages[i];
+        const row = document.createElement('div');
+        row.style.display = 'flex';
+        row.style.alignItems = 'center';
+        row.style.gap = '8px';
+        row.style.marginBottom = '6px';
+
+        // Preview thumbnail
+        const preview = document.createElement('div');
+        preview.style.width = '48px';
+        preview.style.height = '48px';
+        preview.style.borderRadius = '6px';
+        preview.style.overflow = 'hidden';
+        preview.style.flexShrink = '0';
+        preview.style.border = '1px solid rgba(255,182,193,0.15)';
+        if (styleRef.imageData) {
+            const img = document.createElement('img');
+            img.src = `data:image/jpeg;base64,${styleRef.imageData}`;
+            img.style.width = '100%';
+            img.style.height = '100%';
+            img.style.objectFit = 'cover';
+            preview.appendChild(img);
+        }
+
+        // Name label
+        const nameSpan = document.createElement('span');
+        nameSpan.textContent = styleRef.name || `Стиль ${i + 1}`;
+        nameSpan.style.flex = '1';
+        nameSpan.style.color = '#e8e0e0';
+        nameSpan.style.fontSize = '11px';
+
+        // Delete button
+        const deleteBtn = document.createElement('div');
+        deleteBtn.className = 'menu_button';
+        deleteBtn.title = 'Удалить стилевой референс';
+        deleteBtn.innerHTML = '<i class="fa-solid fa-trash"></i>';
+        deleteBtn.style.color = '#cc5555';
+        deleteBtn.addEventListener('click', () => {
+            settings.styleReferenceImages.splice(i, 1);
+            saveSettings();
+            renderStyleRefList();
+            toastr.info('Стилевой референс удалён', 'Генерация картинок');
+        });
+
+        row.appendChild(preview);
+        row.appendChild(nameSpan);
+        row.appendChild(deleteBtn);
+        container.appendChild(row);
+    }
+}
+
+/**
  * Create settings UI
  */
 function createSettingsUI() {
@@ -2244,6 +2311,59 @@ document.getElementById('iig_npc_add')?.addEventListener('click', () => {
     toastr.success(`NPC "${name}" добавлен. Загрузите картинку!`, 'NPC');
 });
 
+        // Style reference checkbox toggle
+    document.getElementById('iig_send_style_ref')?.addEventListener('change', (e) => {
+        settings.sendStyleReference = e.target.checked;
+        saveSettings();
+
+        const styleContainer = document.getElementById('iig_style_ref_container');
+        if (styleContainer) {
+            styleContainer.classList.toggle('hidden', !e.target.checked);
+        }
+    });
+
+    // Style reference image upload
+    document.getElementById('iig_style_ref_upload')?.addEventListener('click', () => {
+        const fileInput = document.createElement('input');
+        fileInput.type = 'file';
+        fileInput.accept = 'image/*';
+        fileInput.addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = async (ev) => {
+                const base64Full = ev.target.result;
+                const rawBase64 = base64Full.split(',')[1];
+                try {
+                    const compressed = await compressImageForReference(rawBase64, 768, 0.75);
+
+                    if (!settings.styleReferenceImages) {
+                        settings.styleReferenceImages = [];
+                    }
+
+                    // Prompt user for a name (or use filename)
+                    const styleName = file.name.replace(/\.[^.]+$/, '') || `style_${Date.now()}`;
+
+                    settings.styleReferenceImages.push({
+                        name: styleName,
+                        imageData: compressed
+                    });
+
+                    saveSettings();
+                    renderStyleRefList();
+                    toastr.success(`Стиль "${styleName}" загружен`, 'Генерация картинок');
+                } catch (err) {
+                    console.error('[IIG] Style ref compression error:', err);
+                    toastr.error('Ошибка сжатия картинки', 'Генерация картинок');
+                }
+            };
+            reader.readAsDataURL(file);
+        });
+        fileInput.click();
+    });
+
+
     // Max retries
     document.getElementById('iig_max_retries')?.addEventListener('input', (e) => {
         settings.maxRetries = parseInt(e.target.value) || 3;
@@ -2260,6 +2380,10 @@ document.getElementById('iig_npc_add')?.addEventListener('click', () => {
     document.getElementById('iig_export_logs')?.addEventListener('click', () => {
         exportLogs();
     });
+    
+     // Render dynamic lists on UI load
+    renderNpcList();
+    renderStyleRefList();
 }
 
 /**
@@ -2310,6 +2434,7 @@ document.getElementById('iig_npc_add')?.addEventListener('click', () => {
     
     console.log('[IIG] Inline Image Generation extension initialized');
 })();
+
 
 
 
