@@ -46,17 +46,6 @@ DO NOT INVENT: If a character name from a reference appears in the prompt, draw 
 CONSISTENCY IS CRITICAL: The reference is the ground truth. Your generated image must depict that same person.
 If the prompt mentions a character name (e.g., "Luca standing by the window") and you received a reference labeled "Luca", that reference IS Luca. Draw Luca exactly as shown in the reference.
 
-STYLE REFERENCES
-Format: [Style reference: "STYLE_NAME". Copy this visual style, color palette, linework, and rendering technique.]
-
-These images define the VISUAL STYLE you must replicate. When you see a style reference:
-
-COPY THE ART STYLE: linework thickness, shading technique (cel-shading, soft gradient, painterly, etc.), level of detail
-COPY THE COLOR PALETTE: hue ranges, saturation levels, contrast, color temperature
-COPY THE RENDERING TECHNIQUE: how skin is rendered, how hair is drawn, how backgrounds are handled, lighting approach
-COPY THE MOOD/AESTHETIC: the overall "feel" of the art (e.g., soft and dreamy, sharp and dramatic, muted and melancholic)
-The style reference is your visual guide. Your output should look like it was drawn by the same artist who created the style reference.
-
 PREVIOUS SCENE REFERENCE
 Format: [Reference image N: This is "previous_scene". Memorize this exact appearance.]
 
@@ -83,6 +72,7 @@ All three work together. Draw the characters from character refs, in the style f
 
 {{setvar::largecothtml::
 - HTML Visuals: What additional HTML element could be added that would fit the story? Is the new element varied and different from those used previously?}}
+
 
 
 
