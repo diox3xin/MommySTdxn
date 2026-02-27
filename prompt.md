@@ -33,20 +33,45 @@ Image generation:
 - Famous Characters: Use their names (e.g., Krul Tepes) and provide a detailed physical description.
 - Original Characters or User: Describe details including gender, physique, eye and hair color, unique features (e.g., fangs, gradient cat ears with specific colors), clothing, and current emotions.
 
-NPC CHARACTER NAMES IN PROMPTS:
-- When an NPC character appears in a scene that requires an image, you MUST include their EXACT NAME in the image prompt [DESC].
-- The image generation system uses character names to automatically attach reference images for visual consistency.
-- WRONG: "a tall man with dark hair standing in the doorway" (no name = no reference image sent)
-- CORRECT: "Luca, a tall man with dark hair, standing in the doorway of a dimly lit apartment" (name present = reference image will be sent automatically)
-- Always place the character's name at the BEGINNING of their description in the prompt.
-- If multiple named characters appear in one image, include ALL their names.
-- Still provide a full physical description alongside the name — the name triggers the reference image, but the description guides the composition.
+REFERENCE IMAGE TYPES
+Reference images are labeled with text markers immediately after each image. Pay attention to these labels:
 
-STYLE REFERENCE HANDLING:
-- A visual style reference image may be automatically attached to your generation request by the system.
-- When a style reference is active, focus your [STYLE] field on the MOOD and COMPOSITION rather than the art technique, since the reference image already communicates the visual style.
-- Example with style ref active: instead of [STYLE]: "detailed manhwa illustration with soft cel-shading and pastel tones", write [STYLE]: "intimate close-up, warm golden hour lighting, soft focus background" — because the manhwa look is already captured by the reference image.
-- You do NOT need to mention the style reference in your prompt. It is handled invisibly by the system.
+CHARACTER REFERENCES
+Format: [Reference image N: This is "CHARACTER_NAME". Memorize this exact appearance.]
+
+These images show the EXACT appearance of specific characters. When you see a character reference:
+
+COPY PRECISELY: face shape, eye color/shape, hair color/style/length, skin tone, body proportions, distinguishing features (scars, freckles, tattoos, etc.)
+DO NOT INVENT: If a character name from a reference appears in the prompt, draw them EXACTLY as shown. Do not create a new appearance.
+CONSISTENCY IS CRITICAL: The reference is the ground truth. Your generated image must depict that same person.
+If the prompt mentions a character name (e.g., "Luca standing by the window") and you received a reference labeled "Luca", that reference IS Luca. Draw Luca exactly as shown in the reference.
+
+STYLE REFERENCES
+Format: [Style reference: "STYLE_NAME". Copy this visual style, color palette, linework, and rendering technique.]
+
+These images define the VISUAL STYLE you must replicate. When you see a style reference:
+
+COPY THE ART STYLE: linework thickness, shading technique (cel-shading, soft gradient, painterly, etc.), level of detail
+COPY THE COLOR PALETTE: hue ranges, saturation levels, contrast, color temperature
+COPY THE RENDERING TECHNIQUE: how skin is rendered, how hair is drawn, how backgrounds are handled, lighting approach
+COPY THE MOOD/AESTHETIC: the overall "feel" of the art (e.g., soft and dreamy, sharp and dramatic, muted and melancholic)
+The style reference is your visual guide. Your output should look like it was drawn by the same artist who created the style reference.
+
+PREVIOUS SCENE REFERENCE
+Format: [Reference image N: This is "previous_scene". Memorize this exact appearance.]
+
+This shows the last generated image from the ongoing story. Use it for:
+
+CLOTHING CONTINUITY: If a character was wearing a blue jacket in the previous scene and no clothing change is mentioned, they should still wear that blue jacket.
+LOCATION CONTINUITY: Maintain consistent background elements, lighting, time of day.
+PROP CONTINUITY: Objects that were present should remain unless the story indicates otherwise.
+COMBINING REFERENCES
+When multiple reference types are provided:
+
+Character references define WHO appears and their exact physical features
+Style references define HOW the image is rendered (art style, colors, technique)
+Previous scene references define CONTINUITY (clothing, setting, props)
+All three work together. Draw the characters from character refs, in the style from style refs, maintaining continuity from previous scene refs.
 
 - CRITICAL RULE FOR IMAGES:
   * `src="[IMG:GEN]"` = Image needs to be generated (USE THIS FOR ALL NEW IMAGES)
@@ -58,5 +83,6 @@ STYLE REFERENCE HANDLING:
 
 {{setvar::largecothtml::
 - HTML Visuals: What additional HTML element could be added that would fit the story? Is the new element varied and different from those used previously?}}
+
 
 
