@@ -297,7 +297,20 @@ async function compressImageForReference(base64Data, maxSize = 1024, quality = 0
                         height = maxSize;
                     }
                 }
-                
+                /**
+ * Detect MIME type from base64 image data header bytes
+ * @param {string} base64Data - Raw base64 data (no data: prefix)
+ * @returns {string} - MIME type string
+ */
+function detectMimeType(base64Data) {
+    if (!base64Data || base64Data.length < 4) return 'image/png';
+    if (base64Data.startsWith('/9j/')) return 'image/jpeg';
+    if (base64Data.startsWith('iVBOR')) return 'image/png';
+    if (base64Data.startsWith('UklGR')) return 'image/webp';
+    if (base64Data.startsWith('R0lGOD')) return 'image/gif';
+    return 'image/png'; // fallback
+}
+
                 // Create canvas and draw resized image
                 const canvas = document.createElement('canvas');
                 canvas.width = width;
@@ -545,7 +558,7 @@ async function generateImageOpenAI(prompt, style, referenceImages = [], options 
     // This endpoint doesn't support img2img, only text-to-image
     // Reference images would need /edits endpoint or provider-specific API
     if (referenceImages.length > 0) {
-        console.log('[IIG] Reference images collected but NOT sent (/generations endpoint is text-to-image only)');
+        iigLog('WARN', `${referenceImages.length} reference image(s) collected but NOT sent — /v1/images/generations is text-to-image only. Labels: [${referenceImages.map(r => r.label || 'unknown').join(', ')}]. Consider switching to Gemini/nano-banana API type for reference support.`);
     }
     
     // Log request details for debugging
@@ -636,67 +649,96 @@ const VALID_IMAGE_SIZES = ['1K', '2K', '4K'];
 
 /**
  * Generate image via Gemini-compatible endpoint (nano-banana)
+ * @param {string} prompt - Image description
+ * @param {string} style - Style string
+ * @param {Array<{data: string, label: string, mimeType: string}>} referenceImages - Reference images with metadata
+ * @param {object} options - Additional options
  */
 async function generateImageGemini(prompt, style, referenceImages = [], options = {}) {
     const settings = getSettings();
     const model = settings.model;
     const baseUrl = settings.endpoint.replace(/\/$/, '');
     const isGoogleApi = baseUrl.includes('googleapis.com');
-    
-    // Google API uses query param for key, other Gemini-compatible APIs use header
-    const url = isGoogleApi 
+
+    const url = isGoogleApi
         ? `${baseUrl}/v1beta/models/${model}:generateContent?key=${settings.apiKey}`
         : `${baseUrl}/v1beta/models/${model}:generateContent`;
-    
-    // Determine aspect ratio: tag option > settings, with validation
+
+    // Determine aspect ratio
     let aspectRatio = options.aspectRatio || settings.aspectRatio || '1:1';
     if (!VALID_ASPECT_RATIOS.includes(aspectRatio)) {
-        iigLog('WARN', `Invalid aspect_ratio "${aspectRatio}", falling back to settings or default`);
+        iigLog('WARN', `Invalid aspect_ratio "${aspectRatio}", falling back to default`);
         aspectRatio = VALID_ASPECT_RATIOS.includes(settings.aspectRatio) ? settings.aspectRatio : '1:1';
     }
-    
-    // Determine image size: tag option > settings, with validation
+
+    // Determine image size
     let imageSize = options.imageSize || settings.imageSize || '1K';
     if (!VALID_IMAGE_SIZES.includes(imageSize)) {
-        iigLog('WARN', `Invalid image_size "${imageSize}", falling back to settings or default`);
+        iigLog('WARN', `Invalid image_size "${imageSize}", falling back to default`);
         imageSize = VALID_IMAGE_SIZES.includes(settings.imageSize) ? settings.imageSize : '1K';
     }
-    
+
     iigLog('INFO', `Using aspect ratio: ${aspectRatio}, image size: ${imageSize}`);
-    
+
     // Build parts array
     const parts = [];
-    
-    // Add reference images first (up to 4)
-    for (const imgB64 of referenceImages.slice(0, 4)) {
+
+    // Separate character refs from style refs
+    const characterRefs = referenceImages.filter(r => !r.label.startsWith('style:'));
+    const styleRefs = referenceImages.filter(r => r.label.startsWith('style:'));
+
+    // Add character reference images with labels (up to 4)
+    for (let idx = 0; idx < Math.min(characterRefs.length, 4); idx++) {
+        const ref = characterRefs[idx];
         parts.push({
             inlineData: {
-                mimeType: 'image/png',
-                data: imgB64
+                mimeType: ref.mimeType,
+                data: ref.data
             }
         });
-    }
-    
-    // Add prompt with style and reference instruction
-    let fullPrompt = style ? `[Style: ${style}] ${prompt}` : prompt;
-    
-    // If reference images provided, add instruction to copy appearance
-    if (referenceImages.length > 0) {
-        const refInstruction = `[CRITICAL: The reference image(s) above show the EXACT appearance of the character(s). You MUST precisely copy their: face structure, eye color, hair color and style, skin tone, body type, clothing, and all distinctive features. Do not deviate from the reference appearances.]`;
-        fullPrompt = `${refInstruction}\n\n${fullPrompt}`;
+        // Add text label immediately after each image so model knows who it is
+        parts.push({
+            text: `[Reference image ${idx + 1}: This is "${ref.label}". Memorize this exact appearance.]`
+        });
     }
 
-    // Style reference instruction
-    if (settings.sendStyleReference && settings.styleReferenceImages?.length > 0) {
-        const styleInstruction = `[STYLE REFERENCE: The reference image(s) show the desired visual STYLE. Match the art style, color palette, linework, rendering technique, and overall aesthetic from these references. Apply this style to all generated content.]`;
-        fullPrompt = `${styleInstruction}\n\n${fullPrompt}`;
+    // Add style reference images
+    for (const ref of styleRefs.slice(0, 2)) {
+        parts.push({
+            inlineData: {
+                mimeType: ref.mimeType,
+                data: ref.data
+            }
+        });
+        const styleName = ref.label.replace('style:', '');
+        parts.push({
+            text: `[Style reference: "${styleName}". Copy this visual style, color palette, linework, and rendering technique.]`
+        });
+    }
+
+    // Build the main prompt
+    let fullPrompt = style ? `[Style: ${style}] ${prompt}` : prompt;
+
+    // Add character reference instruction if we have character refs
+    if (characterRefs.length > 0) {
+        const refList = characterRefs.map((r, i) => `  - Image ${i + 1} = "${r.label}"`).join('\n');
+        const refInstruction = [
+            `[CRITICAL CHARACTER CONSISTENCY INSTRUCTION]`,
+            `The reference images above show the EXACT appearance of specific characters:`,
+            refList,
+            ``,
+            `You MUST precisely replicate each character's: face structure, eye shape and color, hair color/style/length, skin tone, body proportions, and all distinguishing features.`,
+            `When a character name appears in the prompt below, draw them EXACTLY as shown in their reference image. Do NOT invent new appearances.`,
+            `[END INSTRUCTION]`,
+        ].join('\n');
+        fullPrompt = `${refInstruction}\n\n${fullPrompt}`;
     }
 
     parts.push({ text: fullPrompt });
 
-    
-    console.log(`[IIG] Gemini request: ${referenceImages.length} reference image(s) + prompt (${fullPrompt.length} chars)`);
-    
+    iigLog('INFO', `Gemini request: ${characterRefs.length} char ref(s), ${styleRefs.length} style ref(s), prompt ${fullPrompt.length} chars`);
+    iigLog('INFO', `Parts breakdown: ${parts.map(p => p.text ? `text(${p.text.substring(0,40)}...)` : `img(${p.inlineData.mimeType})`).join(' | ')}`);
+
     const body = {
         contents: [{
             role: 'user',
@@ -710,39 +752,35 @@ async function generateImageGemini(prompt, style, referenceImages = [], options 
             }
         }
     };
-    
-    // Log full request config for debugging 400 errors
-    iigLog('INFO', `Gemini request config: model=${model}, aspectRatio=${aspectRatio}, imageSize=${imageSize}, promptLength=${fullPrompt.length}, refImages=${referenceImages.length}`);
-    
-    // Build headers - Google API uses query param for auth, others use Authorization header
+
+    iigLog('INFO', `Gemini request config: model=${model}, aspectRatio=${aspectRatio}, imageSize=${imageSize}, totalParts=${parts.length}`);
+
     const headers = { 'Content-Type': 'application/json' };
     if (!isGoogleApi) {
         headers['Authorization'] = `Bearer ${settings.apiKey}`;
     }
-    
+
     const response = await fetch(url, {
         method: 'POST',
         headers: headers,
         body: JSON.stringify(body)
     });
-    
+
     if (!response.ok) {
         const text = await response.text();
         throw new Error(`API Error (${response.status}): ${text}`);
     }
-    
+
     const result = await response.json();
-    
-    // Parse Gemini response
+
     const candidates = result.candidates || [];
     if (candidates.length === 0) {
         throw new Error('No candidates in response');
     }
-    
+
     const responseParts = candidates[0].content?.parts || [];
-    
+
     for (const part of responseParts) {
-        // Check both camelCase and snake_case variants
         if (part.inlineData) {
             return `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
         }
@@ -750,7 +788,7 @@ async function generateImageGemini(prompt, style, referenceImages = [], options 
             return `data:${part.inline_data.mime_type};base64,${part.inline_data.data}`;
         }
     }
-    
+
     throw new Error('No image found in Gemini response');
 }
 
@@ -800,36 +838,54 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
     const maxRetries = settings.maxRetries;
     const baseDelay = settings.retryDelay;
     
-    // Collect reference images if enabled (works for both OpenAI and Gemini)
+    // Collect reference images with labels and proper mime types
+    // Each entry: { data: string (base64), label: string, mimeType: string }
     const referenceImages = [];
-    
+
     if (settings.sendCharAvatar) {
-        console.log('[IIG] Fetching character avatar for reference...');
+        iigLog('INFO', 'Fetching character avatar for reference...');
         const charAvatar = await getCharacterAvatarBase64();
         if (charAvatar) {
-            referenceImages.push(charAvatar);
-            console.log('[IIG] Character avatar added to references');
+            // Compress avatar for consistent sizing
+            const compressed = await compressImageForReference(charAvatar, 768, 0.85);
+            const charName = SillyTavern.getContext().characters?.[SillyTavern.getContext().characterId]?.name || 'Character';
+            referenceImages.push({
+                data: compressed,
+                label: charName,
+                mimeType: detectMimeType(compressed)
+            });
+            iigLog('INFO', `Character avatar added: "${charName}", ${Math.round(compressed.length/1024)}KB`);
         }
     }
-    
+
     if (settings.sendUserAvatar) {
-        console.log('[IIG] Fetching user avatar for reference...');
+        iigLog('INFO', 'Fetching user avatar for reference...');
         const userAvatar = await getUserAvatarBase64();
         if (userAvatar) {
-            referenceImages.push(userAvatar);
-            console.log('[IIG] User avatar added to references');
+            const compressed = await compressImageForReference(userAvatar, 768, 0.85);
+            const userName = settings.userAvatarFile?.replace(/\.[^.]+$/, '') || 'User';
+            referenceImages.push({
+                data: compressed,
+                label: userName,
+                mimeType: detectMimeType(compressed)
+            });
+            iigLog('INFO', `User avatar added: "${userName}", ${Math.round(compressed.length/1024)}KB`);
         }
     }
-    
+
     if (settings.sendPreviousImage) {
-        console.log('[IIG] Fetching previous generated image for reference...');
+        iigLog('INFO', 'Fetching previous generated image for reference...');
         const prevImage = await getLastGeneratedImageBase64();
         if (prevImage) {
-            referenceImages.push(prevImage);
-            console.log('[IIG] Previous image added to references');
+            referenceImages.push({
+                data: prevImage,
+                label: 'previous_scene',
+                mimeType: detectMimeType(prevImage)
+            });
+            iigLog('INFO', `Previous image added, ${Math.round(prevImage.length/1024)}KB`);
         }
     }
-    
+
     // NPC references - send only if NPC name appears in prompt
     if (settings.npcReferences && settings.npcReferences.length > 0) {
         const promptLower = prompt.toLowerCase();
@@ -838,23 +894,32 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
             if (!npc.enabled || !npc.imageData) continue;
 
             if (promptLower.includes(npc.name.toLowerCase())) {
-                referenceImages.push(npc.imageData);
-                console.log(`[IIG] NPC "${npc.name}" found in prompt, adding reference`);
+                referenceImages.push({
+                    data: npc.imageData,
+                    label: npc.name,
+                    mimeType: detectMimeType(npc.imageData)
+                });
+                iigLog('INFO', `NPC "${npc.name}" found in prompt, adding reference (${Math.round(npc.imageData.length/1024)}KB)`);
             }
         }
-    }  
+    }
 
     // Style reference - always send when enabled
     if (settings.sendStyleReference && settings.styleReferenceImages?.length > 0) {
         for (const styleRef of settings.styleReferenceImages) {
             if (styleRef.imageData) {
-                referenceImages.push(styleRef.imageData);
-                console.log(`[IIG] Style reference "${styleRef.name}" added`);
+                referenceImages.push({
+                    data: styleRef.imageData,
+                    label: `style:${styleRef.name}`,
+                    mimeType: detectMimeType(styleRef.imageData)
+                });
+                iigLog('INFO', `Style reference "${styleRef.name}" added`);
             }
         }
     }
 
-    console.log(`[IIG] Total reference images: ${referenceImages.length}`);
+    iigLog('INFO', `Total reference images: ${referenceImages.length}, labels: [${referenceImages.map(r => r.label).join(', ')}]`);
+
 
     
     // Add default style to the style parameter if set
@@ -1756,7 +1821,7 @@ function renderNpcList() {
                     // Сжимаем для хранения
                     const rawBase64 = base64Full.split(',')[1];
                     try {
-                        const compressed = await compressImageForReference(rawBase64, 512, 0.7);
+                        const compressed = await compressImageForReference(rawBase64, 768, 0.85);
                         settings.npcReferences[i].imageData = compressed;
                         saveSettings();
                         renderNpcList(); // Перерисовать
@@ -2434,6 +2499,7 @@ document.getElementById('iig_npc_add')?.addEventListener('click', () => {
     
     console.log('[IIG] Inline Image Generation extension initialized');
 })();
+
 
 
 
