@@ -821,6 +821,21 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
         }
     }
     
+    // NPC references - send only if NPC name appears in prompt
+if (settings.npcReferences && settings.npcReferences.length > 0) {
+    const promptLower = prompt.toLowerCase();
+
+    for (const npc of settings.npcReferences) {
+        // Пропускаем выключенных и без картинки
+        if (!npc.enabled || !npc.imageData) continue;
+
+        // Проверяем: есть ли имя NPC в промпте?
+        if (promptLower.includes(npc.name.toLowerCase())) {
+            referenceImages.push(npc.imageData);
+            console.log(`[IIG] NPC "${npc.name}" found in prompt, adding reference`);
+        }
+    }
+}
     console.log(`[IIG] Total reference images: ${referenceImages.length}`);
     
     // Add default style to the style parameter if set
@@ -2162,6 +2177,39 @@ function bindSettingsEvents() {
         }
     });
     
+    // В bindSettingsEvents() добавить:
+document.getElementById('iig_npc_add')?.addEventListener('click', () => {
+    const nameInput = document.getElementById('iig_npc_new_name');
+    const name = nameInput?.value?.trim();
+
+    if (!name) {
+        toastr.warning('Введите имя NPC', 'NPC');
+        return;
+    }
+
+    const settings = getSettings();
+    if (!settings.npcReferences) {
+        settings.npcReferences = [];
+    }
+
+    // Проверить дубликат
+    if (settings.npcReferences.some(n => n.name.toLowerCase() === name.toLowerCase())) {
+        toastr.warning(`NPC "${name}" уже существует`, 'NPC');
+        return;
+    }
+
+    settings.npcReferences.push({
+        name: name,
+        imageData: null,
+        enabled: true
+    });
+
+    saveSettings();
+    nameInput.value = '';
+    renderNpcList();
+    toastr.success(`NPC "${name}" добавлен. Загрузите картинку!`, 'NPC');
+});
+
     // Max retries
     document.getElementById('iig_max_retries')?.addEventListener('input', (e) => {
         settings.maxRetries = parseInt(e.target.value) || 3;
@@ -2228,5 +2276,6 @@ function bindSettingsEvents() {
     
     console.log('[IIG] Inline Image Generation extension initialized');
 })();
+
 
 
