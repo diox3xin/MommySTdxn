@@ -297,19 +297,6 @@ async function compressImageForReference(base64Data, maxSize = 1024, quality = 0
                         height = maxSize;
                     }
                 }
-                /**
- * Detect MIME type from base64 image data header bytes
- * @param {string} base64Data - Raw base64 data (no data: prefix)
- * @returns {string} - MIME type string
- */
-function detectMimeType(base64Data) {
-    if (!base64Data || base64Data.length < 4) return 'image/png';
-    if (base64Data.startsWith('/9j/')) return 'image/jpeg';
-    if (base64Data.startsWith('iVBOR')) return 'image/png';
-    if (base64Data.startsWith('UklGR')) return 'image/webp';
-    if (base64Data.startsWith('R0lGOD')) return 'image/gif';
-    return 'image/png'; // fallback
-}
 
                 // Create canvas and draw resized image
                 const canvas = document.createElement('canvas');
@@ -332,7 +319,19 @@ function detectMimeType(base64Data) {
         }
     });
 }
-
+                /**
+ * Detect MIME type from base64 image data header bytes
+ * @param {string} base64Data - Raw base64 data (no data: prefix)
+ * @returns {string} - MIME type string
+ */
+function detectMimeType(base64Data) {
+    if (!base64Data || base64Data.length < 4) return 'image/png';
+    if (base64Data.startsWith('/9j/')) return 'image/jpeg';
+    if (base64Data.startsWith('iVBOR')) return 'image/png';
+    if (base64Data.startsWith('UklGR')) return 'image/webp';
+    if (base64Data.startsWith('R0lGOD')) return 'image/gif';
+    return 'image/png'; // fallback
+}
 /**
  * Save base64 image to file via SillyTavern API
  * @param {string} dataUrl - Data URL (data:image/png;base64,...) or direct URL
@@ -2499,6 +2498,7 @@ document.getElementById('iig_npc_add')?.addEventListener('click', () => {
     
     console.log('[IIG] Inline Image Generation extension initialized');
 })();
+
 
 
 
