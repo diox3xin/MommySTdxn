@@ -92,133 +92,57 @@ const VIDEO_MODEL_KEYWORDS = [
     'vidu', 'wan-ai', 'hunyuan', 'hailuo'
 ];
 
-// We'll parse tags manually since JSON can contain nested braces
-// Tag format: [IMG:GEN:{...json...}] or <img src="[IMG:GEN:{...json...}]">
-
-/**
- * Check if model ID is an image generation model
- */
 function isImageModel(modelId) {
     const mid = modelId.toLowerCase();
-    
-    // Exclude video models
     for (const kw of VIDEO_MODEL_KEYWORDS) {
         if (mid.includes(kw)) return false;
     }
-    
-    // Exclude vision models
     if (mid.includes('vision') && mid.includes('preview')) return false;
-    
-    // Check for image model keywords
     for (const kw of IMAGE_MODEL_KEYWORDS) {
         if (mid.includes(kw)) return true;
     }
-    
     return false;
 }
 
-/**
- * Check if model is Gemini/nano-banana type
- */
 function isGeminiModel(modelId) {
     const mid = modelId.toLowerCase();
     return mid.includes('nano-banana');
 }
 
-/**
- * Get extension settings
- */
 function getSettings() {
     const context = SillyTavern.getContext();
-    
     if (!context.extensionSettings[MODULE_NAME]) {
         context.extensionSettings[MODULE_NAME] = structuredClone(defaultSettings);
     }
-    
-    // Ensure all default keys exist
     for (const key of Object.keys(defaultSettings)) {
         if (!Object.hasOwn(context.extensionSettings[MODULE_NAME], key)) {
             context.extensionSettings[MODULE_NAME][key] = defaultSettings[key];
         }
     }
-    
     return context.extensionSettings[MODULE_NAME];
 }
 
-/**
- * Save settings
- */
 function saveSettings() {
     const context = SillyTavern.getContext();
     context.saveSettingsDebounced();
 }
 
-/**
- * Fetch models list from endpoint
- */
 async function fetchModels() {
     const settings = getSettings();
-    
     if (!settings.endpoint || !settings.apiKey) {
         console.warn('[IIG] Cannot fetch models: endpoint or API key not set');
         return [];
     }
-    
-    const baseUrl = settings.endpoint.replace(/\/$/, '');
-    const isGemini = settings.apiType === 'gemini' || baseUrl.includes('googleapis.com');
-    
-    // Different URL format for Gemini vs OpenAI
-    let url;
-    let fetchOptions;
-    
-    if (isGemini) {
-        // Google Gemini API uses query parameter for auth
-        url = `${baseUrl}/v1beta/models?key=${settings.apiKey}`;
-        fetchOptions = { method: 'GET' };
-    } else {
-        // OpenAI-compatible APIs use Authorization header
-        url = `${baseUrl}/v1/models`;
-        fetchOptions = {
-            method: 'GET',
-            headers: {
-                'Authorization': `Bearer ${settings.apiKey}`
-            }
-        };
-    }
-    
+    const url = `${settings.endpoint.replace(/\/$/, '')}/v1/models`;
     try {
-        const response = await fetch(url, fetchOptions);
-        
-        if (!response.ok) {
-            throw new Error(`HTTP ${response.status}`);
-        }
-        
+        const response = await fetch(url, {
+            method: 'GET',
+            headers: { 'Authorization': `Bearer ${settings.apiKey}` }
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = await response.json();
-        
-        let modelIds = [];
-        
-        if (isGemini) {
-            // Gemini format: { models: [{ name: "models/gemini-2.0-flash", ... }] }
-            const models = data.models || [];
-            modelIds = models.map(m => {
-                // Extract model name from "models/gemini-2.0-flash" -> "gemini-2.0-flash"
-                const name = m.name || '';
-                return name.replace('models/', '');
-            });
-            // Filter for models that support image generation
-            modelIds = modelIds.filter(id => 
-                id.includes('image') || 
-                id.includes('flash') || 
-                id.includes('pro')
-            );
-        } else {
-            // OpenAI format: { data: [{ id: "model-name", ... }] }
-            const models = data.data || [];
-            modelIds = models.filter(m => isImageModel(m.id)).map(m => m.id);
-        }
-        
-        console.log(`[IIG] Fetched ${modelIds.length} models`);
-        return modelIds;
+        const models = data.data || [];
+        return models.filter(m => isImageModel(m.id)).map(m => m.id);
     } catch (error) {
         console.error('[IIG] Failed to fetch models:', error);
         toastr.error(`Ошибка загрузки моделей: ${error.message}`, 'Генерация картинок');
@@ -2567,6 +2491,7 @@ document.getElementById('iig_npc_add')?.addEventListener('click', () => {
     
     console.log('[IIG] Inline Image Generation extension initialized');
 })();
+
 
 
 
