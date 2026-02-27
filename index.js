@@ -1,6 +1,6 @@
 /**
  * Inline Image Generation Extension for SillyTavern
- * 
+ *
  * Catches [IMG:GEN:{json}] tags in AI messages and generates images via configured API.
  * Supports OpenAI-compatible and Gemini-compatible (nano-banana) endpoints.
  */
@@ -18,12 +18,12 @@ function iigLog(level, ...args) {
     const timestamp = new Date().toISOString();
     const message = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
     const entry = `[${timestamp}] [${level}] ${message}`;
-    
+
     logBuffer.push(entry);
     if (logBuffer.length > MAX_LOG_ENTRIES) {
         logBuffer.shift();
     }
-    
+
     if (level === 'ERROR') {
         console.error('[IIG]', ...args);
     } else if (level === 'WARN') {
@@ -54,31 +54,28 @@ const defaultSettings = Object.freeze({
     model: '',
     size: '1024x1024',
     quality: 'standard',
-    maxRetries: 0, // No auto-retry - user clicks error image to retry manually
+    maxRetries: 0,
     retryDelay: 1000,
-    // Reference images (works for both OpenAI and Gemini)
+    // Reference images
     sendCharAvatar: false,
     sendUserAvatar: false,
-    sendPreviousImage: false, // Send last generated image as reference for consistency
-    userAvatarFile: '', // Selected user avatar filename from /User Avatars/
-    // Style preset - added to every prompt
-    defaultStyle: '', // e.g. "semi_realistic, manhwa style, soft lighting"
+    sendPreviousImage: false,
+    userAvatarFile: '',
+    // NEW: User character name for prompt matching
+    userCharacterName: '', // e.g. "Юзер", "MC", "Protagonist" - names that refer to user in prompts
+    // Style preset
+    defaultStyle: '',
     // Gemini/nano-banana specific
-    aspectRatio: '1:1', // "1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"
-    imageSize: '1K', // "1K", "2K", "4K"
+    aspectRatio: '1:1',
+    imageSize: '1K',
     // NPC References
-    // Array of { name: string, imageData: string|null, enabled: boolean }
-    // Reference is sent only when NPC name appears in the generation prompt
     npcReferences: [],
-
     // Style References
-    // Array of { name: string, imageData: string }
-    // Sent with every generation when enabled, instructs model to copy visual style
     styleReferenceImages: [],
     sendStyleReference: false,
 });
 
-// Image model detection keywords (from your api_client.py)
+// Image model detection keywords
 const IMAGE_MODEL_KEYWORDS = [
     'dall-e', 'midjourney', 'mj', 'journey', 'stable-diffusion', 'sdxl', 'flux',
     'imagen', 'drawing', 'paint', 'image', 'seedream', 'hidream', 'dreamshaper',
@@ -150,9 +147,6 @@ async function fetchModels() {
     }
 }
 
-/**
- * Fetch list of user avatars from /User Avatars/ directory
- */
 async function fetchUserAvatars() {
     try {
         const context = SillyTavern.getContext();
@@ -160,30 +154,26 @@ async function fetchUserAvatars() {
             method: 'POST',
             headers: context.getRequestHeaders(),
         });
-        
+
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
         }
-        
-        return await response.json(); // Returns array of filenames
+
+        return await response.json();
     } catch (error) {
         console.error('[IIG] Failed to fetch user avatars:', error);
         return [];
     }
 }
 
-/**
- * Convert image URL to base64
- */
 async function imageUrlToBase64(url) {
     try {
         const response = await fetch(url);
         const blob = await response.blob();
-        
+
         return new Promise((resolve, reject) => {
             const reader = new FileReader();
             reader.onloadend = () => {
-                // Remove data URL prefix to get pure base64
                 const base64 = reader.result.split(',')[1];
                 resolve(base64);
             };
@@ -196,22 +186,14 @@ async function imageUrlToBase64(url) {
     }
 }
 
-/**
- * Resize and compress image for use as reference
- * @param {string} base64Data - Base64 image data (without data: prefix)
- * @param {number} maxSize - Maximum width/height in pixels
- * @param {number} quality - JPEG quality 0-1
- * @returns {Promise<string>} - Compressed base64 data
- */
 async function compressImageForReference(base64Data, maxSize = 1024, quality = 0.8) {
     return new Promise((resolve, reject) => {
         try {
             const img = new Image();
             img.onload = () => {
-                // Calculate new dimensions
                 let width = img.width;
                 let height = img.height;
-                
+
                 if (width > maxSize || height > maxSize) {
                     if (width > height) {
                         height = Math.round(height * maxSize / width);
@@ -222,17 +204,15 @@ async function compressImageForReference(base64Data, maxSize = 1024, quality = 0
                     }
                 }
 
-                // Create canvas and draw resized image
                 const canvas = document.createElement('canvas');
                 canvas.width = width;
                 canvas.height = height;
                 const ctx = canvas.getContext('2d');
                 ctx.drawImage(img, 0, 0, width, height);
-                
-                // Convert to JPEG for smaller size
+
                 const compressedDataUrl = canvas.toDataURL('image/jpeg', quality);
                 const compressedBase64 = compressedDataUrl.replace('data:image/jpeg;base64,', '');
-                
+
                 console.log(`[IIG] Compressed image: ${img.width}x${img.height} -> ${width}x${height}, size: ${Math.round(compressedBase64.length/1024)}KB`);
                 resolve(compressedBase64);
             };
@@ -243,77 +223,63 @@ async function compressImageForReference(base64Data, maxSize = 1024, quality = 0
         }
     });
 }
-                /**
- * Detect MIME type from base64 image data header bytes
- * @param {string} base64Data - Raw base64 data (no data: prefix)
- * @returns {string} - MIME type string
- */
+
 function detectMimeType(base64Data) {
     if (!base64Data || base64Data.length < 4) return 'image/png';
     if (base64Data.startsWith('/9j/')) return 'image/jpeg';
     if (base64Data.startsWith('iVBOR')) return 'image/png';
     if (base64Data.startsWith('UklGR')) return 'image/webp';
     if (base64Data.startsWith('R0lGOD')) return 'image/gif';
-    return 'image/png'; // fallback
+    return 'image/png';
 }
-/**
- * Save base64 image to file via SillyTavern API
- * @param {string} dataUrl - Data URL (data:image/png;base64,...) or direct URL
- * @returns {Promise<string>} - Relative path to saved file
- */
+
 async function saveImageToFile(dataUrl) {
     const context = SillyTavern.getContext();
-    
+
     console.log('[IIG] saveImageToFile input type:', dataUrl?.substring(0, 50));
-    
-    // If it's a direct URL (not data:), download and convert
-if (dataUrl && !dataUrl.startsWith('data:') && (dataUrl.startsWith('http://') || dataUrl.startsWith('https://'))) {
-    console.log('[IIG] Downloading image from URL...');
-    try {
-        const response = await fetch(dataUrl);
-        const blob = await response.blob();
 
-        // FIX: Использовать FileReader вместо spread на огромном массиве
-        const base64 = await new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onloadend = () => {
-                // reader.result уже в формате data:mime;base64,...
-                resolve(reader.result);
-            };
-            reader.onerror = reject;
-            reader.readAsDataURL(blob);
-        });
+    if (dataUrl && !dataUrl.startsWith('data:') && (dataUrl.startsWith('http://') || dataUrl.startsWith('https://'))) {
+        console.log('[IIG] Downloading image from URL...');
+        try {
+            const response = await fetch(dataUrl);
+            const blob = await response.blob();
 
-        dataUrl = base64; // Уже data URL!
-        console.log('[IIG] Converted URL to data URL via FileReader');
-    } catch (err) {
-        console.error('[IIG] Failed to download image:', err);
-        throw new Error('Failed to download image from URL');
+            const base64 = await new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onloadend = () => {
+                    resolve(reader.result);
+                };
+                reader.onerror = reject;
+                reader.readAsDataURL(blob);
+            });
+
+            dataUrl = base64;
+            console.log('[IIG] Converted URL to data URL via FileReader');
+        } catch (err) {
+            console.error('[IIG] Failed to download image:', err);
+            throw new Error('Failed to download image from URL');
+        }
     }
-}
-    
-    // Extract base64 and format from data URL
+
     const match = dataUrl.match(/^data:image\/(\w+);base64,(.+)$/);
     if (!match) {
         console.error('[IIG] Invalid data URL, starts with:', dataUrl?.substring(0, 100));
         throw new Error('Invalid data URL format');
     }
-    
-    const format = match[1]; // png, jpeg, webp
+
+    const format = match[1];
     const base64Data = match[2];
-    
+
     console.log(`[IIG] Saving image: format=${format}, base64 length=${base64Data.length}`);
-    
-    // Get character name for subfolder
+
     let charName = 'generated';
     if (context.characterId !== undefined && context.characters?.[context.characterId]) {
         charName = context.characters[context.characterId].name || 'generated';
     }
-    
-    // Generate unique filename
+
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     const filename = `iig_${timestamp}`;
-    
+
     const response = await fetch('/api/images/upload', {
         method: 'POST',
         headers: context.getRequestHeaders(),
@@ -324,32 +290,28 @@ if (dataUrl && !dataUrl.startsWith('data:') && (dataUrl.startsWith('http://') ||
             filename: filename
         })
     });
-    
+
     if (!response.ok) {
         const error = await response.json().catch(() => ({ error: 'Unknown error' }));
         throw new Error(error.error || `Upload failed: ${response.status}`);
     }
-    
+
     const result = await response.json();
     console.log('[IIG] Image saved to:', result.path);
     return result.path;
 }
 
-/**
- * Get character avatar as base64
- */
 async function getCharacterAvatarBase64() {
     try {
         const context = SillyTavern.getContext();
-        
+
         console.log('[IIG] Getting character avatar, characterId:', context.characterId);
-        
+
         if (context.characterId === undefined || context.characterId === null) {
             console.log('[IIG] No character selected');
             return null;
         }
-        
-        // Try context method first
+
         if (typeof context.getCharacterAvatar === 'function') {
             const avatarUrl = context.getCharacterAvatar(context.characterId);
             console.log('[IIG] getCharacterAvatar returned:', avatarUrl);
@@ -357,8 +319,7 @@ async function getCharacterAvatarBase64() {
                 return await imageUrlToBase64(avatarUrl);
             }
         }
-        
-        // Fallback: try to get from characters array
+
         const character = context.characters?.[context.characterId];
         console.log('[IIG] Character from array:', character?.name, 'avatar:', character?.avatar);
         if (character?.avatar) {
@@ -366,7 +327,7 @@ async function getCharacterAvatarBase64() {
             console.log('[IIG] Found character avatar:', avatarUrl);
             return await imageUrlToBase64(avatarUrl);
         }
-        
+
         console.log('[IIG] Could not get character avatar');
         return null;
     } catch (error) {
@@ -375,19 +336,15 @@ async function getCharacterAvatarBase64() {
     }
 }
 
-/**
- * Get user avatar as base64 (full resolution, not thumbnail)
- */
 async function getUserAvatarBase64() {
     try {
         const settings = getSettings();
-        
-        // Use selected avatar from settings (user's choice)
+
         if (!settings.userAvatarFile) {
             console.log('[IIG] No user avatar selected in settings');
             return null;
         }
-        
+
         const avatarUrl = `/User Avatars/${encodeURIComponent(settings.userAvatarFile)}`;
         console.log('[IIG] Using selected user avatar:', avatarUrl);
         return await imageUrlToBase64(avatarUrl);
@@ -397,44 +354,34 @@ async function getUserAvatarBase64() {
     }
 }
 
-/**
- * Get the last generated image from chat as base64 (compressed for reference use)
- * Searches backwards through messages to find the most recent iig-generated image
- */
 async function getLastGeneratedImageBase64(currentMessageId = null) {
     try {
         const context = SillyTavern.getContext();
         const chat = context.chat || [];
-        
-        // Search backwards through messages
+
         for (let i = chat.length - 1; i >= 0; i--) {
             const message = chat[i];
-            
-            // Skip current message if specified
+
             if (currentMessageId !== null && i === currentMessageId) {
                 continue;
             }
-            
+
             const mes = message.mes || '';
-            
-            // Look for our generated images (they have paths like /user/images/...)
+
             const imgMatch = mes.match(/src=["']?(\/user\/images\/[^"'\s>]+)/i);
             if (imgMatch) {
                 const imagePath = imgMatch[1];
                 console.log('[IIG] Found previous generated image:', imagePath);
-                
-                // Convert to base64
+
                 const rawBase64 = await imageUrlToBase64(imagePath);
                 if (!rawBase64) return null;
-                
-                // Compress for reference use (max 1024px, 80% quality)
-                // This reduces 3MB images to ~100-200KB
+
                 console.log(`[IIG] Original previous image size: ${Math.round(rawBase64.length/1024)}KB, compressing...`);
                 const compressed = await compressImageForReference(rawBase64, 1024, 0.8);
                 return compressed;
             }
         }
-        
+
         console.log('[IIG] No previous generated images found in chat');
         return null;
     } catch (error) {
@@ -443,57 +390,36 @@ async function getLastGeneratedImageBase64(currentMessageId = null) {
     }
 }
 
-/**
- * Generate image via OpenAI-compatible endpoint
- */
 async function generateImageOpenAI(prompt, style, referenceImages = [], options = {}) {
     const settings = getSettings();
     const url = `${settings.endpoint.replace(/\/$/, '')}/v1/images/generations`;
-    
-    // Combine style and prompt
+
     const fullPrompt = style ? `[Style: ${style}] ${prompt}` : prompt;
-    
-    // Map aspect ratio to size if provided in tag
-    // Using sizes compatible with most providers (VoidAI, etc.)
+
     let size = settings.size;
     if (options.aspectRatio) {
         if (options.aspectRatio === '16:9' || options.aspectRatio === '3:2') size = '1536x1024';
         else if (options.aspectRatio === '9:16' || options.aspectRatio === '2:3') size = '1024x1536';
         else if (options.aspectRatio === '1:1') size = '1024x1024';
-        else size = 'auto'; // fallback для нестандартных соотношений
+        else size = 'auto';
     }
-    
-    // Detect model type for parameter compatibility
-    const modelLower = (settings.model || '').toLowerCase();
-    const isDallE = modelLower.includes('dall-e') || modelLower.includes('dalle');
-    const isGptImage = modelLower.includes('gpt-image');
-    const isFlux = modelLower.includes('flux');
-    const isImagen = modelLower.includes('imagen');
-    
-    // Build request body
+
     const body = {
         model: settings.model,
         prompt: fullPrompt,
         n: 1
     };
-    
-    // Size - add for most models
+
     if (size && size !== 'auto') {
         body.size = size;
     }
-    
-    // Response format - request base64 for easier handling
-    // Note: Some providers may ignore this or return URL anyway
+
     body.response_format = 'b64_json';
-    
-    // Reference images - DISABLED for standard /generations endpoint
-    // This endpoint doesn't support img2img, only text-to-image
-    // Reference images would need /edits endpoint or provider-specific API
+
     if (referenceImages.length > 0) {
-        iigLog('WARN', `${referenceImages.length} reference image(s) collected but NOT sent — /v1/images/generations is text-to-image only. Labels: [${referenceImages.map(r => r.label || 'unknown').join(', ')}]. Consider switching to Gemini/nano-banana API type for reference support.`);
+        iigLog('WARN', `${referenceImages.length} reference image(s) collected but NOT sent - /v1/images/generations is text-to-image only. Labels: [${referenceImages.map(r => r.label || 'unknown').join(', ')}]. Consider switching to Gemini/nano-banana API type for reference support.`);
     }
-    
-    // Log request details for debugging
+
     console.log('[IIG] OpenAI Request:', {
         url: url,
         model: body.model,
@@ -503,7 +429,7 @@ async function generateImageOpenAI(prompt, style, referenceImages = [], options 
         promptLength: fullPrompt.length,
         bodyKeys: Object.keys(body)
     });
-    
+
     const response = await fetch(url, {
         method: 'POST',
         headers: {
@@ -512,27 +438,21 @@ async function generateImageOpenAI(prompt, style, referenceImages = [], options 
         },
         body: JSON.stringify(body)
     });
-    
+
     if (!response.ok) {
         const text = await response.text();
         throw new Error(`API Error (${response.status}): ${text}`);
     }
-    
+
     const result = await response.json();
-    
+
     console.log('[IIG] OpenAI API response structure:', Object.keys(result));
-    
-    // Parse response - handle different formats
-    // Standard OpenAI: { data: [{ b64_json: "..." }] }
-    // VoidAI might: { data: [{ b64_json: "..." }] } or { images: [...] } or { url: "..." }
-    
+
     const dataList = result.data || result.images || [];
-    
+
     if (dataList.length === 0) {
-        // Try direct url/image field
         if (result.url) return result.url;
         if (result.image) {
-            // Some APIs return raw base64 in 'image' field
             if (result.image.startsWith('data:')) return result.image;
             return `data:image/png;base64,${result.image}`;
         }
@@ -542,49 +462,64 @@ async function generateImageOpenAI(prompt, style, referenceImages = [], options 
         console.error('[IIG] Full response:', JSON.stringify(result).substring(0, 500));
         throw new Error('No image data in response');
     }
-    
+
     const imageObj = dataList[0];
     console.log('[IIG] Image object keys:', Object.keys(imageObj));
-    
-    // Handle different field names
+
     const b64Data = imageObj.b64_json || imageObj.b64 || imageObj.base64 || imageObj.image;
     const urlData = imageObj.url || imageObj.uri;
-    
+
     if (b64Data) {
-        // Check if it already has data: prefix
         if (b64Data.startsWith('data:')) {
             return b64Data;
         }
-        // Detect image format from base64 header
         let mimeType = 'image/png';
         if (b64Data.startsWith('/9j/')) mimeType = 'image/jpeg';
         else if (b64Data.startsWith('R0lGOD')) mimeType = 'image/gif';
         else if (b64Data.startsWith('UklGR')) mimeType = 'image/webp';
-        
+
         console.log(`[IIG] Image mime type detected: ${mimeType}, data length: ${b64Data.length}`);
         return `data:${mimeType};base64,${b64Data}`;
     }
-    
+
     if (urlData) {
         console.log('[IIG] Got URL instead of base64:', urlData.substring(0, 100));
         return urlData;
     }
-    
+
     console.error('[IIG] Unexpected image object structure:', JSON.stringify(imageObj).substring(0, 300));
     throw new Error('Unexpected image response format');
 }
 
-// Valid aspect ratios for Gemini/nano-banana
 const VALID_ASPECT_RATIOS = ['1:1', '2:3', '3:2', '3:4', '4:3', '4:5', '5:4', '9:16', '16:9', '21:9'];
-// Valid image sizes for Gemini/nano-banana
 const VALID_IMAGE_SIZES = ['1K', '2K', '4K'];
 
 /**
+ * Check if a name appears in the prompt (fuzzy matching)
+ * Handles variations like "Юзер", "юзера", "User", etc.
+ */
+function nameAppearsInPrompt(name, prompt) {
+    if (!name || !prompt) return false;
+
+    const nameLower = name.toLowerCase();
+    const promptLower = prompt.toLowerCase();
+
+    // Direct match
+    if (promptLower.includes(nameLower)) return true;
+
+    // Try without last 1-2 characters (for Russian declensions: Юзер -> Юзера, Юзеру)
+    if (nameLower.length > 3) {
+        const nameBase1 = nameLower.slice(0, -1);
+        const nameBase2 = nameLower.slice(0, -2);
+        if (promptLower.includes(nameBase1) || promptLower.includes(nameBase2)) return true;
+    }
+
+    return false;
+}
+
+/**
  * Generate image via Gemini-compatible endpoint (nano-banana)
- * @param {string} prompt - Image description
- * @param {string} style - Style string
- * @param {Array<{data: string, label: string, mimeType: string}>} referenceImages - Reference images with metadata
- * @param {object} options - Additional options
+ * IMPROVED: Better reference image handling for consistent character appearance
  */
 async function generateImageGemini(prompt, style, referenceImages = [], options = {}) {
     const settings = getSettings();
@@ -596,14 +531,12 @@ async function generateImageGemini(prompt, style, referenceImages = [], options 
         ? `${baseUrl}/v1beta/models/${model}:generateContent?key=${settings.apiKey}`
         : `${baseUrl}/v1beta/models/${model}:generateContent`;
 
-    // Determine aspect ratio
     let aspectRatio = options.aspectRatio || settings.aspectRatio || '1:1';
     if (!VALID_ASPECT_RATIOS.includes(aspectRatio)) {
         iigLog('WARN', `Invalid aspect_ratio "${aspectRatio}", falling back to default`);
         aspectRatio = VALID_ASPECT_RATIOS.includes(settings.aspectRatio) ? settings.aspectRatio : '1:1';
     }
 
-    // Determine image size
     let imageSize = options.imageSize || settings.imageSize || '1K';
     if (!VALID_IMAGE_SIZES.includes(imageSize)) {
         iigLog('WARN', `Invalid image_size "${imageSize}", falling back to default`);
@@ -612,36 +545,66 @@ async function generateImageGemini(prompt, style, referenceImages = [], options 
 
     iigLog('INFO', `Using aspect ratio: ${aspectRatio}, image size: ${imageSize}`);
 
-    // Build parts array
-    const parts = [];
-
     // Separate character refs from style refs
     const characterRefs = referenceImages.filter(r => !r.label.startsWith('style:'));
     const styleRefs = referenceImages.filter(r => r.label.startsWith('style:'));
 
-    // Add character reference images with labels (up to 4)
+    // Build parts array with IMPROVED structure
+    const parts = [];
+
+    // ===== STEP 1: Add preliminary instruction BEFORE any images =====
+    if (characterRefs.length > 0 || styleRefs.length > 0) {
+        let preInstruction = `[IMPORTANT: REFERENCE IMAGES FOLLOW]
+You will receive reference images. Your task is to PRECISELY COPY the appearance of characters shown.
+
+`;
+        if (characterRefs.length > 0) {
+            preInstruction += `CHARACTER REFERENCES (${characterRefs.length} images):
+These images show EXACT appearances you MUST replicate. Do NOT improvise or "improve" their looks.
+`;
+            characterRefs.forEach((ref, i) => {
+                preInstruction += `  - Reference Image ${i + 1}: "${ref.label}"\n`;
+            });
+            preInstruction += `\n`;
+        }
+
+        if (styleRefs.length > 0) {
+            preInstruction += `STYLE REFERENCES (${styleRefs.length} images):
+These define the art style to use. Copy the technique, NOT the content.
+`;
+        }
+
+        parts.push({ text: preInstruction });
+    }
+
+    // ===== STEP 2: Add character reference images with STRONG labels =====
     for (let idx = 0; idx < Math.min(characterRefs.length, 4); idx++) {
         const ref = characterRefs[idx];
+
+        // Add image
         parts.push({
             inlineData: {
                 mimeType: ref.mimeType,
                 data: ref.data
             }
         });
-        // Add text label immediately after each image so model knows who it is
+
+        // Add STRONG label immediately after
         parts.push({
-    text: `[CHARACTER REFERENCE: "${ref.label}"]
-This image shows the EXACT appearance of a character named "${ref.label}".
-When "${ref.label}" appears in the prompt, you MUST draw them with:
-- This EXACT face (eye shape, nose, lips, jawline)
-- This EXACT hair (color, length, style, texture)
-- This EXACT skin tone
-- This EXACT body type and proportions
-Do NOT alter or "improve" their appearance. Copy it precisely.`
-});
+            text: `[REFERENCE IMAGE ${idx + 1}: "${ref.label}"]
+^^^ THIS IS THE EXACT APPEARANCE OF "${ref.label}" ^^^
+MANDATORY: When drawing "${ref.label}", you MUST use:
+• THIS EXACT face shape, eye shape, eye color, nose, mouth, jawline
+• THIS EXACT hair color, hair length, hair style, hair texture
+• THIS EXACT skin tone and complexion
+• THIS EXACT body type and proportions
+DO NOT CHANGE ANYTHING. DO NOT "IMPROVE" OR "STYLIZE" THE FACE.
+COPY THE FACE EXACTLY AS SHOWN IN THIS REFERENCE.
+`
+        });
     }
 
-    // Add style reference images
+    // ===== STEP 3: Add style reference images =====
     for (const ref of styleRefs.slice(0, 2)) {
         parts.push({
             inlineData: {
@@ -649,87 +612,71 @@ Do NOT alter or "improve" their appearance. Copy it precisely.`
                 data: ref.data
             }
         });
+
         const styleName = ref.label.replace('style:', '');
-parts.push({
-    text: `[STYLE REFERENCE: "${styleName}"]
-This image defines the VISUAL STYLE for your output. You must replicate:
-- The art technique (digital painting, anime cel-shading, oil painting, etc.)
-- The color palette and saturation levels
-- The linework quality (soft, sharp, sketchy, clean)
-- The rendering style (realistic, stylized, flat, dimensional)
-- The lighting approach and mood
-- The level of detail and texture
-The CONTENT of this image is irrelevant. Only copy its ARTISTIC STYLE.
-Apply this style to whatever scene is described in the prompt.`
-});
+        parts.push({
+            text: `[STYLE REFERENCE: "${styleName}"]
+^^^ COPY THE ART STYLE FROM THIS IMAGE ^^^
+Replicate: art technique, color palette, linework, shading, lighting approach.
+The CONTENT of this image is irrelevant. Only copy HOW it is drawn.
+`
+        });
     }
 
-    // Build the main prompt
-    let fullPrompt = style ? `[Style: ${style}] ${prompt}` : prompt;
+    // ===== STEP 4: Build the main prompt with character mapping =====
+    let fullPrompt = '';
 
-    // Add character reference instruction if we have character refs
+    // Add final reference summary
     if (characterRefs.length > 0) {
-        const refList = characterRefs.map((r, i) => `  - Image ${i + 1} = "${r.label}"`).join('\n');
-// Строим разные инструкции в зависимости от того, что есть
-let refInstruction = '';
+        fullPrompt += `[CHARACTER APPEARANCE MAPPING]
+When the following names appear in the scene description, draw them EXACTLY as shown in their reference images:
+`;
+        characterRefs.forEach((ref, i) => {
+            fullPrompt += `• "${ref.label}" = Reference Image ${i + 1} (COPY EXACTLY)\n`;
+        });
+        fullPrompt += `
+CRITICAL RULES:
+1. Face features must be IDENTICAL to references (not "similar" - IDENTICAL)
+2. Hair must match references exactly (color, length, style)
+3. Skin tone must match references exactly
+4. Do NOT add beauty filters or idealize features
+5. If reference shows freckles, scars, or other features - INCLUDE THEM
 
-if (characterRefs.length > 0 && styleRefs.length > 0) {
-    // Есть и персонажи, и стиль
-    const charList = characterRefs.map((r, i) => `  - Image ${i + 1}: "${r.label}" (character)`).join('\n');
-    const styleList = styleRefs.map((r, i) => `  - Image ${characterRefs.length + i + 1}: "${r.label.replace('style:', '')}" (style)`).join('\n');
-
-    refInstruction = `[REFERENCE IMAGES PROVIDED]
-
-CHARACTER REFERENCES (copy their appearance exactly):
-${charList}
-
-STYLE REFERENCES (copy this artistic style):
-${styleList}
-
-INSTRUCTIONS:
-1. When a character name from the list appears in the prompt, draw them EXACTLY as shown in their reference image. Do not change their face, hair, or body.
-2. Apply the visual style from the style reference(s) to the entire image. This means using the same art technique, color palette, linework, and rendering approach.
-3. The style reference defines HOW to draw. The character references define WHO to draw. The prompt defines WHAT scene to draw.
-
-[END REFERENCES]
+[END CHARACTER MAPPING]
 
 `;
-} else if (characterRefs.length > 0) {
-    // Only chars
-    const charList = characterRefs.map((r, i) => `  - Image ${i + 1} = "${r.label}"`).join('\n');
+    }
 
-    refInstruction = `[CHARACTER REFERENCE IMAGES]
-The images above show the EXACT appearance of these characters:
-${charList}
-
-When any of these names appear in the prompt below, you MUST draw them with their EXACT appearance from the reference:
-- Same face structure, eye shape/color, nose, lips
-- Same hair color, length, style
-- Same skin tone
-- Same body type
-
-Do NOT invent new features or "improve" their look. Replicate precisely.
-[END REFERENCES]
+    if (styleRefs.length > 0) {
+        fullPrompt += `[STYLE INSTRUCTION]
+Apply the visual style from the style reference(s) to this scene.
+[END STYLE INSTRUCTION]
 
 `;
-} else if (styleRefs.length > 0) {
-    // Only style
-    refInstruction = `[STYLE REFERENCE IMAGE]
-The image(s) above define the VISUAL STYLE you must use.
-Copy the art technique, color palette, linework, shading, and overall aesthetic.
-The content of the style reference is irrelevant — only replicate its artistic approach.
-Apply this style to the scene described in the prompt below.
-[END STYLE REFERENCE]
+    }
 
-`;
-}
-        fullPrompt = `${refInstruction}\n\n${fullPrompt}`;
+    // Add style prefix and main prompt
+    if (style) {
+        fullPrompt += `[Requested Style: ${style}]\n\n`;
+    }
+
+    fullPrompt += `[SCENE TO GENERATE]
+${prompt}
+[END SCENE]`;
+
+    // Add final reminder
+    if (characterRefs.length > 0) {
+        fullPrompt += `
+
+[FINAL REMINDER]
+The characters in this scene MUST look EXACTLY like their reference images.
+Check each character's face against their reference before finalizing.`;
     }
 
     parts.push({ text: fullPrompt });
 
     iigLog('INFO', `Gemini request: ${characterRefs.length} char ref(s), ${styleRefs.length} style ref(s), prompt ${fullPrompt.length} chars`);
-    iigLog('INFO', `Parts breakdown: ${parts.map(p => p.text ? `text(${p.text.substring(0,40)}...)` : `img(${p.inlineData.mimeType})`).join(' | ')}`);
+    iigLog('INFO', `Parts breakdown: ${parts.map(p => p.text ? `text(${p.text.substring(0,50)}...)` : `img(${p.inlineData?.mimeType})`).join(' | ')}`);
 
     const body = {
         contents: [{
@@ -784,13 +731,10 @@ Apply this style to the scene described in the prompt below.
     throw new Error('No image found in Gemini response');
 }
 
-/**
- * Validate settings before generation
- */
 function validateSettings() {
     const settings = getSettings();
     const errors = [];
-    
+
     if (!settings.endpoint) {
         errors.push('URL эндпоинта не настроен');
     }
@@ -800,15 +744,12 @@ function validateSettings() {
     if (!settings.model) {
         errors.push('Модель не выбрана');
     }
-    
+
     if (errors.length > 0) {
         throw new Error(`Ошибка настроек: ${errors.join(', ')}`);
     }
 }
 
-/**
- * Sanitize text for safe HTML display
- */
 function sanitizeForHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
@@ -817,28 +758,22 @@ function sanitizeForHtml(text) {
 
 /**
  * Generate image with retry logic
- * @param {string} prompt - Image description
- * @param {string} style - Style tag
- * @param {function} onStatusUpdate - Status callback
- * @param {object} options - Additional options (aspectRatio, quality)
+ * IMPROVED: Better name matching for references
  */
 async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {}) {
-    // Validate settings first
     validateSettings();
-    
+
     const settings = getSettings();
     const maxRetries = settings.maxRetries;
     const baseDelay = settings.retryDelay;
-    
-    // Collect reference images with labels and proper mime types
-    // Each entry: { data: string (base64), label: string, mimeType: string }
+
     const referenceImages = [];
 
+    // Character avatar
     if (settings.sendCharAvatar) {
         iigLog('INFO', 'Fetching character avatar for reference...');
         const charAvatar = await getCharacterAvatarBase64();
         if (charAvatar) {
-            // Compress avatar for consistent sizing
             const compressed = await compressImageForReference(charAvatar, 768, 0.85);
             const charName = SillyTavern.getContext().characters?.[SillyTavern.getContext().characterId]?.name || 'Character';
             referenceImages.push({
@@ -850,12 +785,17 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
         }
     }
 
+    // User avatar - IMPROVED: use custom name if set
     if (settings.sendUserAvatar) {
         iigLog('INFO', 'Fetching user avatar for reference...');
         const userAvatar = await getUserAvatarBase64();
         if (userAvatar) {
             const compressed = await compressImageForReference(userAvatar, 768, 0.85);
-            const userName = settings.userAvatarFile?.replace(/\.[^.]+$/, '') || 'User';
+            // Use custom name if set, otherwise use filename
+            let userName = settings.userCharacterName?.trim();
+            if (!userName) {
+                userName = settings.userAvatarFile?.replace(/\.[^.]+$/, '') || 'User';
+            }
             referenceImages.push({
                 data: compressed,
                 label: userName,
@@ -865,6 +805,7 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
         }
     }
 
+    // Previous image
     if (settings.sendPreviousImage) {
         iigLog('INFO', 'Fetching previous generated image for reference...');
         const prevImage = await getLastGeneratedImageBase64();
@@ -878,14 +819,13 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
         }
     }
 
-    // NPC references - send only if NPC name appears in prompt
+    // NPC references - IMPROVED: fuzzy name matching
     if (settings.npcReferences && settings.npcReferences.length > 0) {
-        const promptLower = prompt.toLowerCase();
-
         for (const npc of settings.npcReferences) {
             if (!npc.enabled || !npc.imageData) continue;
 
-            if (promptLower.includes(npc.name.toLowerCase())) {
+            // Use improved name matching
+            if (nameAppearsInPrompt(npc.name, prompt)) {
                 referenceImages.push({
                     data: npc.imageData,
                     label: npc.name,
@@ -896,7 +836,7 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
         }
     }
 
-    // Style reference - always send when enabled
+    // Style reference
     if (settings.sendStyleReference && settings.styleReferenceImages?.length > 0) {
         for (const styleRef of settings.styleReferenceImages) {
             if (styleRef.imageData) {
@@ -912,22 +852,18 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
 
     iigLog('INFO', `Total reference images: ${referenceImages.length}, labels: [${referenceImages.map(r => r.label).join(', ')}]`);
 
-
-    
-    // Add default style to the style parameter if set
     let finalStyle = style || '';
     if (settings.defaultStyle) {
         finalStyle = settings.defaultStyle + (finalStyle ? ', ' + finalStyle : '');
         console.log(`[IIG] Using default style: ${settings.defaultStyle}`);
     }
-    
+
     let lastError;
-    
+
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
         try {
             onStatusUpdate?.(`Генерация${attempt > 0 ? ` (повтор ${attempt}/${maxRetries})` : ''}...`);
-            
-            // Choose API based on type or model
+
             if (settings.apiType === 'gemini' || isGeminiModel(settings.model)) {
                 return await generateImageGemini(prompt, finalStyle, referenceImages, options);
             } else {
@@ -936,31 +872,27 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
         } catch (error) {
             lastError = error;
             console.error(`[IIG] Generation attempt ${attempt + 1} failed:`, error);
-            
-            // Check if retryable
+
             const isRetryable = error.message?.includes('429') ||
                                error.message?.includes('503') ||
                                error.message?.includes('502') ||
                                error.message?.includes('504') ||
                                error.message?.includes('timeout') ||
                                error.message?.includes('network');
-            
+
             if (!isRetryable || attempt === maxRetries) {
                 break;
             }
-            
+
             const delay = baseDelay * Math.pow(2, attempt);
             onStatusUpdate?.(`Повтор через ${delay / 1000}с...`);
             await new Promise(resolve => setTimeout(resolve, delay));
         }
     }
-    
+
     throw lastError;
 }
 
-/**
- * Check if a file exists on the server
- */
 async function checkFileExists(path) {
     try {
         const response = await fetch(path, { method: 'HEAD' });
@@ -970,69 +902,53 @@ async function checkFileExists(path) {
     }
 }
 
-/**
- * Parse image generation tags from message text
- * Supports two formats:
- * 1. NEW: <img data-iig-instruction='{"style":"...","prompt":"..."}' src="[IMG:GEN]">
- * 2. LEGACY: [IMG:GEN:{"style":"...","prompt":"..."}]
- * 
- * @param {string} text - Message text
- * @param {object} options - Options
- * @param {boolean} options.checkExistence - Check if image files exist (for hallucination detection)
- * @param {boolean} options.forceAll - Include all instruction tags even with valid paths (for regeneration)
- */
 async function parseImageTags(text, options = {}) {
     const { checkExistence = false, forceAll = false } = options;
     const tags = [];
-    
-    // === NEW FORMAT: <img data-iig-instruction="{...}" src="[IMG:GEN]"> ===
-    // LLM often generates broken HTML with unescaped quotes, so we parse manually
+
     const imgTagMarker = 'data-iig-instruction=';
     let searchPos = 0;
-    
+
     while (true) {
         const markerPos = text.indexOf(imgTagMarker, searchPos);
         if (markerPos === -1) break;
-        
-        // Find the start of the <img tag
+
         let imgStart = text.lastIndexOf('<img', markerPos);
         if (imgStart === -1 || markerPos - imgStart > 500) {
             searchPos = markerPos + 1;
             continue;
         }
-        
-        // Find the JSON start (first { after the marker)
+
         const afterMarker = markerPos + imgTagMarker.length;
         let jsonStart = text.indexOf('{', afterMarker);
         if (jsonStart === -1 || jsonStart > afterMarker + 10) {
             searchPos = markerPos + 1;
             continue;
         }
-        
-        // Find matching closing brace using brace counting
+
         let braceCount = 0;
         let jsonEnd = -1;
         let inString = false;
         let escapeNext = false;
-        
+
         for (let i = jsonStart; i < text.length; i++) {
             const char = text[i];
-            
+
             if (escapeNext) {
                 escapeNext = false;
                 continue;
             }
-            
+
             if (char === '\\' && inString) {
                 escapeNext = true;
                 continue;
             }
-            
+
             if (char === '"') {
                 inString = !inString;
                 continue;
             }
-            
+
             if (!inString) {
                 if (char === '{') {
                     braceCount++;
@@ -1045,80 +961,70 @@ async function parseImageTags(text, options = {}) {
                 }
             }
         }
-        
+
         if (jsonEnd === -1) {
             searchPos = markerPos + 1;
             continue;
         }
-        
-        // Find the end of the <img> tag
+
         let imgEnd = text.indexOf('>', jsonEnd);
         if (imgEnd === -1) {
             searchPos = markerPos + 1;
             continue;
         }
-        imgEnd++; // Include the >
-        
+        imgEnd++;
+
         const fullImgTag = text.substring(imgStart, imgEnd);
         const instructionJson = text.substring(jsonStart, jsonEnd);
-        
-        // Check if src needs generation
+
         const srcMatch = fullImgTag.match(/src\s*=\s*["']?([^"'\s>]+)/i);
         const srcValue = srcMatch ? srcMatch[1] : '';
-        
-        // Determine if this needs generation
+
         let needsGeneration = false;
         const hasMarker = srcValue.includes('[IMG:GEN]') || srcValue.includes('[IMG:');
-        const hasErrorImage = srcValue.includes('error.svg'); // Our error placeholder - NO auto-retry
+        const hasErrorImage = srcValue.includes('error.svg');
         const hasPath = srcValue && srcValue.startsWith('/') && srcValue.length > 5;
-        
-        // Skip error images - user must click to retry manually (prevents conflict on swipe)
+
         if (hasErrorImage && !forceAll) {
             iigLog('INFO', `Skipping error image (click to retry): ${srcValue.substring(0, 50)}`);
             searchPos = imgEnd;
             continue;
         }
-        
+
         if (forceAll) {
-            // Regeneration mode: include all tags with instruction (user-triggered)
             needsGeneration = true;
             iigLog('INFO', `Force regeneration mode: including ${srcValue.substring(0, 30)}`);
         } else if (hasMarker || !srcValue) {
-            // Explicit marker or empty src = needs generation
             needsGeneration = true;
         } else if (hasPath && checkExistence) {
-            // Has a path - check if file actually exists
             const exists = await checkFileExists(srcValue);
             if (!exists) {
-                // File doesn't exist = LLM hallucinated the path
                 iigLog('WARN', `File does not exist (LLM hallucination?): ${srcValue}`);
                 needsGeneration = true;
             } else {
                 iigLog('INFO', `Skipping existing image: ${srcValue.substring(0, 50)}`);
             }
         } else if (hasPath) {
-            // Has path but not checking existence - skip
             iigLog('INFO', `Skipping path (no existence check): ${srcValue.substring(0, 50)}`);
             searchPos = imgEnd;
             continue;
         }
-        
+
         if (!needsGeneration) {
             searchPos = imgEnd;
             continue;
         }
-        
+
         try {
-            // Normalize JSON: AI sometimes uses single quotes, HTML entities, etc.
             let normalizedJson = instructionJson
-                .replace(/&quot;/g, '"')
-                .replace(/&apos;/g, "'")
-                .replace(/&#39;/g, "'")
-                .replace(/&#34;/g, '"')
-                .replace(/&amp;/g, '&');
-            
+                .replace(/"/g, '"')
+                .replace(/'/g, "'")
+                .replace(/'/g, "'")
+                .replace(/"/g, '"')
+                .replace(/&/g, '&');
+
             const data = JSON.parse(normalizedJson);
-            
+
             tags.push({
                 fullMatch: fullImgTag,
                 index: imgStart,
@@ -1128,51 +1034,49 @@ async function parseImageTags(text, options = {}) {
                 imageSize: data.image_size || data.imageSize || null,
                 quality: data.quality || null,
                 isNewFormat: true,
-                existingSrc: hasPath ? srcValue : null // Store existing src for logging
+                existingSrc: hasPath ? srcValue : null
             });
-            
+
             iigLog('INFO', `Found NEW format tag: ${data.prompt?.substring(0, 50)}`);
         } catch (e) {
             iigLog('WARN', `Failed to parse instruction JSON: ${instructionJson.substring(0, 100)}`, e.message);
         }
-        
+
         searchPos = imgEnd;
     }
-    
-    // === LEGACY FORMAT: [IMG:GEN:{...}] ===
+
     const marker = '[IMG:GEN:';
     let searchStart = 0;
-    
+
     while (true) {
         const markerIndex = text.indexOf(marker, searchStart);
         if (markerIndex === -1) break;
-        
+
         const jsonStart = markerIndex + marker.length;
-        
-        // Find the matching closing brace for JSON
+
         let braceCount = 0;
         let jsonEnd = -1;
         let inString = false;
         let escapeNext = false;
-        
+
         for (let i = jsonStart; i < text.length; i++) {
             const char = text[i];
-            
+
             if (escapeNext) {
                 escapeNext = false;
                 continue;
             }
-            
+
             if (char === '\\' && inString) {
                 escapeNext = true;
                 continue;
             }
-            
+
             if (char === '"') {
                 inString = !inString;
                 continue;
             }
-            
+
             if (!inString) {
                 if (char === '{') {
                     braceCount++;
@@ -1185,26 +1089,26 @@ async function parseImageTags(text, options = {}) {
                 }
             }
         }
-        
+
         if (jsonEnd === -1) {
             searchStart = jsonStart;
             continue;
         }
-        
+
         const jsonStr = text.substring(jsonStart, jsonEnd);
-        
+
         const afterJson = text.substring(jsonEnd);
         if (!afterJson.startsWith(']')) {
             searchStart = jsonEnd;
             continue;
         }
-        
+
         const tagOnly = text.substring(markerIndex, jsonEnd + 1);
-        
+
         try {
             const normalizedJson = jsonStr.replace(/'/g, '"');
             const data = JSON.parse(normalizedJson);
-            
+
             tags.push({
                 fullMatch: tagOnly,
                 index: markerIndex,
@@ -1215,21 +1119,18 @@ async function parseImageTags(text, options = {}) {
                 quality: data.quality || null,
                 isNewFormat: false
             });
-            
+
             iigLog('INFO', `Found LEGACY format tag: ${data.prompt?.substring(0, 50)}`);
         } catch (e) {
             iigLog('WARN', `Failed to parse legacy tag JSON: ${jsonStr.substring(0, 100)}`, e.message);
         }
-        
+
         searchStart = jsonEnd + 1;
     }
-    
+
     return tags;
 }
 
-/**
- * Create loading placeholder element
- */
 function createLoadingPlaceholder(tagId) {
     const placeholder = document.createElement('div');
     placeholder.className = 'iig-loading-placeholder';
@@ -1241,13 +1142,8 @@ function createLoadingPlaceholder(tagId) {
     return placeholder;
 }
 
-// Error image path - served from extension folder
 const ERROR_IMAGE_PATH = '/scripts/extensions/third-party/sillyimages/error.svg';
 
-/**
- * Create error placeholder element - just shows error.svg, no click handlers
- * User uses the regenerate button in message menu to retry
- */
 function createErrorPlaceholder(tagId, errorMessage, tagInfo) {
     const img = document.createElement('img');
     img.className = 'iig-error-image';
@@ -1255,37 +1151,31 @@ function createErrorPlaceholder(tagId, errorMessage, tagInfo) {
     img.alt = 'Ошибка генерации';
     img.title = `Ошибка: ${errorMessage}`;
     img.dataset.tagId = tagId;
-    
-    // Preserve data-iig-instruction for regenerate button functionality
+
     if (tagInfo.fullMatch) {
         const instructionMatch = tagInfo.fullMatch.match(/data-iig-instruction\s*=\s*(['"])([\s\S]*?)\1/i);
         if (instructionMatch) {
             img.setAttribute('data-iig-instruction', instructionMatch[2]);
         }
     }
-    
+
     return img;
 }
 
-/**
- * Process image tags in a message
- */
 async function processMessageTags(messageId) {
     const context = SillyTavern.getContext();
     const settings = getSettings();
-    
+
     if (!settings.enabled) return;
-    
-    // Prevent duplicate processing
+
     if (processingMessages.has(messageId)) {
         iigLog('WARN', `Message ${messageId} is already being processed, skipping`);
         return;
     }
-    
+
     const message = context.chat[messageId];
     if (!message || message.is_user) return;
-    
-    // Check for tags, with file existence check to catch LLM hallucinations
+
     const tags = await parseImageTags(message.mes, { checkExistence: true });
     iigLog('INFO', `parseImageTags returned: ${tags.length} tags`);
     if (tags.length > 0) {
@@ -1295,74 +1185,62 @@ async function processMessageTags(messageId) {
         iigLog('INFO', 'No tags found by parser');
         return;
     }
-    
-    // Mark as processing
+
     processingMessages.add(messageId);
     iigLog('INFO', `Found ${tags.length} image tag(s) in message ${messageId}`);
     toastr.info(`Найдено тегов: ${tags.length}. Генерация...`, 'Генерация картинок', { timeOut: 3000 });
-    
-    // DOM is ready because we use CHARACTER_MESSAGE_RENDERED event
+
     const messageElement = document.querySelector(`#chat .mes[mesid="${messageId}"]`);
     if (!messageElement) {
         console.error('[IIG] Message element not found for ID:', messageId);
         toastr.error('Не удалось найти элемент сообщения', 'Генерация картинок');
         return;
     }
-    
+
     const mesTextEl = messageElement.querySelector('.mes_text');
     if (!mesTextEl) return;
-    
-    // Process each tag in parallel
+
     const processTag = async (tag, index) => {
         const tagId = `iig-${messageId}-${index}`;
-        
+
         iigLog('INFO', `Processing tag ${index}: ${tag.fullMatch.substring(0, 50)}`);
-        
-        // Create loading placeholder
+
         const loadingPlaceholder = createLoadingPlaceholder(tagId);
         let targetElement = null;
-        
+
         if (tag.isNewFormat) {
-            // NEW FORMAT: <img data-iig-instruction='...'> is a real DOM element
-            // Find it by looking for img with data-iig-instruction attribute
             const allImgs = mesTextEl.querySelectorAll('img[data-iig-instruction]');
             iigLog('INFO', `Searching for img element. Found ${allImgs.length} img[data-iig-instruction] elements in DOM`);
-            
-            // Debug: log what we're looking for vs what's in DOM
+
             const searchPrompt = tag.prompt.substring(0, 30);
             iigLog('INFO', `Searching for prompt starting with: "${searchPrompt}"`);
-            
+
             for (const img of allImgs) {
                 const instruction = img.getAttribute('data-iig-instruction');
                 const src = img.getAttribute('src') || '';
                 iigLog('INFO', `DOM img - src: "${src.substring(0, 50)}", instruction (first 100): "${instruction?.substring(0, 100)}"`);
-                
-                // Try multiple matching strategies
+
                 if (instruction) {
-                    // Strategy 1: Decode HTML entities and normalize quotes, then match
                     const decodedInstruction = instruction
-                        .replace(/&quot;/g, '"')
-                        .replace(/&apos;/g, "'")
-                        .replace(/&#39;/g, "'")
-                        .replace(/&#34;/g, '"')
-                        .replace(/&amp;/g, '&');
-                    
-                    // Also normalize the search prompt the same way
+                        .replace(/"/g, '"')
+                        .replace(/'/g, "'")
+                        .replace(/'/g, "'")
+                        .replace(/"/g, '"')
+                        .replace(/&/g, '&');
+
                     const normalizedSearchPrompt = searchPrompt
-                        .replace(/&quot;/g, '"')
-                        .replace(/&apos;/g, "'")
-                        .replace(/&#39;/g, "'")
-                        .replace(/&#34;/g, '"')
-                        .replace(/&amp;/g, '&');
-                    
-                    // Check if decoded instruction contains the prompt
+                        .replace(/"/g, '"')
+                        .replace(/'/g, "'")
+                        .replace(/'/g, "'")
+                        .replace(/"/g, '"')
+                        .replace(/&/g, '&');
+
                     if (decodedInstruction.includes(normalizedSearchPrompt)) {
                         iigLog('INFO', `Found img element via decoded instruction match`);
                         targetElement = img;
                         break;
                     }
-                    
-                    // Strategy 2: Try to parse the instruction as JSON and compare prompts
+
                     try {
                         const normalizedJson = decodedInstruction.replace(/'/g, '"');
                         const instructionData = JSON.parse(normalizedJson);
@@ -1372,10 +1250,8 @@ async function processMessageTags(messageId) {
                             break;
                         }
                     } catch (e) {
-                        // JSON parse failed, continue with other strategies
                     }
-                    
-                    // Strategy 3: Raw instruction contains raw search prompt (original approach)
+
                     if (instruction.includes(searchPrompt)) {
                         iigLog('INFO', `Found img element via raw instruction match`);
                         targetElement = img;
@@ -1383,13 +1259,11 @@ async function processMessageTags(messageId) {
                     }
                 }
             }
-            
-            // Alternative: find by src containing markers (when prompt matching fails)
+
             if (!targetElement) {
                 iigLog('INFO', `Prompt matching failed, trying src marker matching...`);
                 for (const img of allImgs) {
                     const src = img.getAttribute('src') || '';
-                    // Check for generation markers or empty/broken src
                     if (src.includes('[IMG:GEN]') || src.includes('[IMG:ERROR]') || src === '' || src === '#') {
                         iigLog('INFO', `Found img element with generation marker in src: "${src}"`);
                         targetElement = img;
@@ -1397,15 +1271,12 @@ async function processMessageTags(messageId) {
                     }
                 }
             }
-            
-            // Strategy 4: If still not found, try looking at ALL imgs (not just those with data-iig-instruction attr)
-            // This handles cases where browser didn't parse data-iig-instruction as a valid attribute
+
             if (!targetElement) {
                 iigLog('INFO', `Trying broader img search...`);
                 const allImgsInMes = mesTextEl.querySelectorAll('img');
                 for (const img of allImgsInMes) {
                     const src = img.getAttribute('src') || '';
-                    // Look for src containing our markers
                     if (src.includes('[IMG:GEN]') || src.includes('[IMG:ERROR]')) {
                         iigLog('INFO', `Found img via broad search with marker src: "${src.substring(0, 50)}"`);
                         targetElement = img;
@@ -1414,24 +1285,22 @@ async function processMessageTags(messageId) {
                 }
             }
         } else {
-            // LEGACY FORMAT: [IMG:GEN:{...}] - use regex replacement
             const tagEscaped = tag.fullMatch
                 .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-                .replace(/"/g, '(?:"|&quot;)');
+                .replace(/"/g, '(?:"|")');
             const tagRegex = new RegExp(tagEscaped, 'g');
-            
+
             const beforeReplace = mesTextEl.innerHTML;
             mesTextEl.innerHTML = mesTextEl.innerHTML.replace(
                 tagRegex,
                 `<span data-iig-placeholder="${tagId}"></span>`
             );
-            
+
             if (beforeReplace !== mesTextEl.innerHTML) {
                 targetElement = mesTextEl.querySelector(`[data-iig-placeholder="${tagId}"]`);
                 iigLog('INFO', `Legacy tag replaced with placeholder span`);
             }
-            
-            // Also check for img src containing legacy tag
+
             if (!targetElement) {
                 const allImgs = mesTextEl.querySelectorAll('img');
                 for (const img of allImgs) {
@@ -1443,10 +1312,8 @@ async function processMessageTags(messageId) {
                 }
             }
         }
-        
-        // Replace target with placeholder, preserving parent styling context
+
         if (targetElement) {
-            // Copy some styling context from parent for adaptive placeholder
             const parent = targetElement.parentElement;
             if (parent) {
                 const parentStyle = window.getComputedStyle(parent);
@@ -1460,9 +1327,9 @@ async function processMessageTags(messageId) {
             iigLog('WARN', `Could not find target element, appending placeholder as fallback`);
             mesTextEl.appendChild(loadingPlaceholder);
         }
-        
+
         const statusEl = loadingPlaceholder.querySelector('.iig-status');
-        
+
         try {
             const dataUrl = await generateImageWithRetry(
                 tag.prompt,
@@ -1470,81 +1337,63 @@ async function processMessageTags(messageId) {
                 (status) => { statusEl.textContent = status; },
                 { aspectRatio: tag.aspectRatio, imageSize: tag.imageSize, quality: tag.quality }
             );
-            
-            // Save image to file instead of keeping base64
+
             statusEl.textContent = 'Сохранение...';
             const imagePath = await saveImageToFile(dataUrl);
-            
-            // Replace placeholder with actual image
+
             const img = document.createElement('img');
             img.className = 'iig-generated-image';
             img.src = imagePath;
             img.alt = tag.prompt;
             img.title = `Style: ${tag.style}\nPrompt: ${tag.prompt}`;
-            
-            // Preserve instruction for future regenerations (new format only)
+
             if (tag.isNewFormat) {
                 const instructionMatch = tag.fullMatch.match(/data-iig-instruction\s*=\s*(['"])([\s\S]*?)\1/i);
                 if (instructionMatch) {
                     img.setAttribute('data-iig-instruction', instructionMatch[2]);
                 }
             }
-            
+
             loadingPlaceholder.replaceWith(img);
-            
-            // Update message.mes to persist the image
+
             if (tag.isNewFormat) {
-                // NEW FORMAT: <img data-iig-instruction="..." src="[IMG:GEN]">
-                // Just update the src attribute with the real path
-                // LLM sees same format but with real path = already generated
                 const updatedTag = tag.fullMatch.replace(/src\s*=\s*(['"])[^'"]*\1/i, `src="${imagePath}"`);
                 message.mes = message.mes.replace(tag.fullMatch, updatedTag);
             } else {
-                // LEGACY FORMAT: [IMG:GEN:{...}]
-                // Replace with completion marker so LLM doesn't copy it
                 const completionMarker = `[IMG:✓:${imagePath}]`;
                 message.mes = message.mes.replace(tag.fullMatch, completionMarker);
             }
-            
+
             iigLog('INFO', `Successfully generated image for tag ${index}`);
             toastr.success(`Картинка ${index + 1}/${tags.length} готова`, 'Генерация картинок', { timeOut: 2000 });
         } catch (error) {
             iigLog('ERROR', `Failed to generate image for tag ${index}:`, error.message);
-            
-            // Replace with error placeholder
+
             const errorPlaceholder = createErrorPlaceholder(tagId, error.message, tag);
             loadingPlaceholder.replaceWith(errorPlaceholder);
-            
-            // IMPORTANT: Mark tag as failed in message.mes - use error.svg path so it displays properly after swipe
+
             if (tag.isNewFormat) {
-                // NEW FORMAT: update src with error image path (will be detected for retry)
                 const errorTag = tag.fullMatch.replace(/src\s*=\s*(['"])[^'"]*\1/i, `src="${ERROR_IMAGE_PATH}"`);
                 message.mes = message.mes.replace(tag.fullMatch, errorTag);
             } else {
-                // LEGACY FORMAT: replace with error marker
                 const errorMarker = `[IMG:ERROR:${error.message.substring(0, 50)}]`;
                 message.mes = message.mes.replace(tag.fullMatch, errorMarker);
             }
             iigLog('INFO', `Marked tag as failed in message.mes`);
-            
+
             toastr.error(`Ошибка генерации: ${error.message}`, 'Генерация картинок');
         }
     };
-    
+
     try {
-        // Process all tags in parallel
         await Promise.all(tags.map((tag, index) => processTag(tag, index)));
     } finally {
-        // Always remove from processing set
         processingMessages.delete(messageId);
         iigLog('INFO', `Finished processing message ${messageId}`);
     }
-    
-    // Save chat to persist changes
+
     await context.saveChat();
-    
-    // Force re-render the message to show updated content
-    // Use SillyTavern's messageFormatting if available
+
     if (typeof context.messageFormatting === 'function') {
         const formattedMessage = context.messageFormatting(
             message.mes,
@@ -1556,94 +1405,82 @@ async function processMessageTags(messageId) {
         mesTextEl.innerHTML = formattedMessage;
         console.log('[IIG] Message re-rendered via messageFormatting');
     } else {
-        // Fallback: trigger a manual re-render by finding and updating the element
         const freshMessageEl = document.querySelector(`#chat .mes[mesid="${messageId}"] .mes_text`);
         if (freshMessageEl && message.mes) {
-            // Simple approach: just reload the message content
-            // This works because message.mes now contains the image path instead of the tag
             console.log('[IIG] Attempting manual refresh...');
         }
     }
 }
 
-/**
- * Regenerate all images in a message (user-triggered)
- */
 async function regenerateMessageImages(messageId) {
     const context = SillyTavern.getContext();
     const message = context.chat[messageId];
-    
+
     if (!message) {
         toastr.error('Сообщение не найдено', 'Генерация картинок');
         return;
     }
-    
-    // Parse ALL instruction tags, forcing regeneration
+
     const tags = await parseImageTags(message.mes, { forceAll: true });
-    
+
     if (tags.length === 0) {
         toastr.warning('Нет тегов для перегенерации', 'Генерация картинок');
         return;
     }
-    
+
     iigLog('INFO', `Regenerating ${tags.length} images in message ${messageId}`);
     toastr.info(`Перегенерация ${tags.length} картинок...`, 'Генерация картинок');
-    
-    // Process using existing logic
+
     processingMessages.add(messageId);
-    
+
     const messageElement = document.querySelector(`#chat .mes[mesid="${messageId}"]`);
     if (!messageElement) {
         processingMessages.delete(messageId);
         return;
     }
-    
+
     const mesTextEl = messageElement.querySelector('.mes_text');
     if (!mesTextEl) {
         processingMessages.delete(messageId);
         return;
     }
-    
+
     for (let index = 0; index < tags.length; index++) {
         const tag = tags[index];
         const tagId = `iig-regen-${messageId}-${index}`;
-        
+
         try {
-            // Find the existing img element with data-iig-instruction
             const existingImg = mesTextEl.querySelector(`img[data-iig-instruction]`);
             if (existingImg) {
-                // Preserve the instruction for future regenerations
                 const instruction = existingImg.getAttribute('data-iig-instruction');
-                
+
                 const loadingPlaceholder = createLoadingPlaceholder(tagId);
                 existingImg.replaceWith(loadingPlaceholder);
-                
+
                 const statusEl = loadingPlaceholder.querySelector('.iig-status');
-                
+
                 const dataUrl = await generateImageWithRetry(
                     tag.prompt,
                     tag.style,
                     (status) => { statusEl.textContent = status; },
                     { aspectRatio: tag.aspectRatio, imageSize: tag.imageSize, quality: tag.quality }
                 );
-                
+
                 statusEl.textContent = 'Сохранение...';
                 const imagePath = await saveImageToFile(dataUrl);
-                
+
                 const img = document.createElement('img');
                 img.className = 'iig-generated-image';
                 img.src = imagePath;
                 img.alt = tag.prompt;
-                // Preserve instruction for future regenerations
                 if (instruction) {
                     img.setAttribute('data-iig-instruction', instruction);
                 }
                 loadingPlaceholder.replaceWith(img);
-                
-                // Update message.mes
+
                 const updatedTag = tag.fullMatch.replace(/src\s*=\s*(['"])[^'"]*\1/i, `src="${imagePath}"`);
                 message.mes = message.mes.replace(tag.fullMatch, updatedTag);
-                
+
                 toastr.success(`Картинка ${index + 1}/${tags.length} готова`, 'Генерация картинок', { timeOut: 2000 });
             }
         } catch (error) {
@@ -1651,23 +1488,18 @@ async function regenerateMessageImages(messageId) {
             toastr.error(`Ошибка: ${error.message}`, 'Генерация картинок');
         }
     }
-    
+
     processingMessages.delete(messageId);
     await context.saveChat();
     iigLog('INFO', `Regeneration complete for message ${messageId}`);
 }
 
-/**
- * Add regenerate button to message extra menu (three dots)
- */
 function addRegenerateButton(messageElement, messageId) {
-    // Check if button already exists
     if (messageElement.querySelector('.iig-regenerate-btn')) return;
-    
-    // Find the extraMesButtons container (three dots menu)
+
     const extraMesButtons = messageElement.querySelector('.extraMesButtons');
     if (!extraMesButtons) return;
-    
+
     const btn = document.createElement('div');
     btn.className = 'mes_button iig-regenerate-btn fa-solid fa-images interactable';
     btn.title = 'Перегенерировать картинки';
@@ -1676,66 +1508,53 @@ function addRegenerateButton(messageElement, messageId) {
         e.stopPropagation();
         await regenerateMessageImages(messageId);
     });
-    
+
     extraMesButtons.appendChild(btn);
 }
 
-/**
- * Add regenerate buttons to all existing AI messages in chat
- */
 function addButtonsToExistingMessages() {
     const context = SillyTavern.getContext();
     if (!context.chat || context.chat.length === 0) return;
-    
+
     const messageElements = document.querySelectorAll('#chat .mes');
     let addedCount = 0;
-    
+
     for (const messageElement of messageElements) {
         const mesId = messageElement.getAttribute('mesid');
         if (mesId === null) continue;
-        
+
         const messageId = parseInt(mesId, 10);
         const message = context.chat[messageId];
-        
-        // Only add to AI messages (not user messages)
+
         if (message && !message.is_user) {
             addRegenerateButton(messageElement, messageId);
             addedCount++;
         }
     }
-    
+
     iigLog('INFO', `Added regenerate buttons to ${addedCount} existing messages`);
 }
 
-// NOTE: No click handlers on error images - user uses the regenerate button in message menu
-
-/**
- * Handle CHARACTER_MESSAGE_RENDERED event
- * This fires AFTER the message is rendered to DOM
- */
 async function onMessageReceived(messageId) {
     iigLog('INFO', `onMessageReceived: ${messageId}`);
-    
+
     const settings = getSettings();
     if (!settings.enabled) {
         iigLog('INFO', 'Extension disabled, skipping');
         return;
     }
-    
+
     const context = SillyTavern.getContext();
     const message = context.chat[messageId];
-    
+
     const messageElement = document.querySelector(`#chat .mes[mesid="${messageId}"]`);
     if (!messageElement) return;
-    
-    // Always add regenerate button for AI messages
+
     addRegenerateButton(messageElement, messageId);
-    
+
     await processMessageTags(messageId);
 }
-/**
- * Render NPC list in settings UI
- */
+
 function renderNpcList() {
     const settings = getSettings();
     const container = document.getElementById('iig_npc_list');
@@ -1756,7 +1575,6 @@ function renderNpcList() {
         row.style.gap = '8px';
         row.style.marginBottom = '6px';
 
-        // Checkbox (включён/выключен)
         const checkbox = document.createElement('input');
         checkbox.type = 'checkbox';
         checkbox.checked = npc.enabled !== false;
@@ -1765,14 +1583,12 @@ function renderNpcList() {
             saveSettings();
         });
 
-        // Имя
         const nameSpan = document.createElement('span');
         nameSpan.textContent = npc.name;
         nameSpan.style.flex = '1';
         nameSpan.style.color = '#e8e0e0';
         nameSpan.style.fontSize = '12px';
 
-        // Превью картинки (если есть)
         const preview = document.createElement('div');
         preview.style.width = '32px';
         preview.style.height = '32px';
@@ -1794,7 +1610,6 @@ function renderNpcList() {
             preview.innerHTML = '<i class="fa-solid fa-user" style="color:#5a5252;font-size:14px;"></i>';
         }
 
-        // Кнопка загрузки картинки
         const uploadBtn = document.createElement('div');
         uploadBtn.className = 'menu_button';
         uploadBtn.title = 'Загрузить картинку';
@@ -1810,13 +1625,12 @@ function renderNpcList() {
                 const reader = new FileReader();
                 reader.onload = async (ev) => {
                     const base64Full = ev.target.result;
-                    // Сжимаем для хранения
                     const rawBase64 = base64Full.split(',')[1];
                     try {
                         const compressed = await compressImageForReference(rawBase64, 768, 0.85);
                         settings.npcReferences[i].imageData = compressed;
                         saveSettings();
-                        renderNpcList(); // Перерисовать
+                        renderNpcList();
                         toastr.success(`Картинка для ${npc.name} загружена`, 'NPC');
                     } catch (err) {
                         toastr.error('Ошибка сжатия картинки', 'NPC');
@@ -1827,7 +1641,6 @@ function renderNpcList() {
             fileInput.click();
         });
 
-        // Кнопка удаления
         const deleteBtn = document.createElement('div');
         deleteBtn.className = 'menu_button';
         deleteBtn.title = 'Удалить NPC';
@@ -1849,9 +1662,6 @@ function renderNpcList() {
     }
 }
 
-/**
- * Render style reference images list in settings UI
- */
 function renderStyleRefList() {
     const settings = getSettings();
     const container = document.getElementById('iig_style_ref_list');
@@ -1872,7 +1682,6 @@ function renderStyleRefList() {
         row.style.gap = '8px';
         row.style.marginBottom = '6px';
 
-        // Preview thumbnail
         const preview = document.createElement('div');
         preview.style.width = '48px';
         preview.style.height = '48px';
@@ -1889,14 +1698,12 @@ function renderStyleRefList() {
             preview.appendChild(img);
         }
 
-        // Name label
         const nameSpan = document.createElement('span');
         nameSpan.textContent = styleRef.name || `Стиль ${i + 1}`;
         nameSpan.style.flex = '1';
         nameSpan.style.color = '#e8e0e0';
         nameSpan.style.fontSize = '11px';
 
-        // Delete button
         const deleteBtn = document.createElement('div');
         deleteBtn.className = 'menu_button';
         deleteBtn.title = 'Удалить стилевой референс';
@@ -1916,19 +1723,16 @@ function renderStyleRefList() {
     }
 }
 
-/**
- * Create settings UI
- */
 function createSettingsUI() {
     const settings = getSettings();
     const context = SillyTavern.getContext();
-    
+
     const container = document.getElementById('extensions_settings');
     if (!container) {
         console.error('[IIG] Settings container not found');
         return;
     }
-    
+
     const html = `
         <div class="inline-drawer">
             <div class="inline-drawer-toggle inline-drawer-header">
@@ -1937,17 +1741,15 @@ function createSettingsUI() {
             </div>
             <div class="inline-drawer-content">
                 <div class="iig-settings">
-                    <!-- Вкл/Выкл -->
                     <label class="checkbox_label">
                         <input type="checkbox" id="iig_enabled" ${settings.enabled ? 'checked' : ''}>
                         <span>Включить генерацию картинок</span>
                     </label>
-                    
+
                     <hr>
-                    
+
                     <h4>Настройки API</h4>
-                    
-                    <!-- Тип эндпоинта -->
+
                     <div class="flex-row">
                         <label for="iig_api_type">Тип API</label>
                         <select id="iig_api_type" class="flex1">
@@ -1955,26 +1757,23 @@ function createSettingsUI() {
                             <option value="gemini" ${settings.apiType === 'gemini' ? 'selected' : ''}>Gemini-совместимый (nano-banana)</option>
                         </select>
                     </div>
-                    
-                    <!-- URL эндпоинта -->
+
                     <div class="flex-row">
                         <label for="iig_endpoint">URL эндпоинта</label>
-                        <input type="text" id="iig_endpoint" class="text_pole flex1" 
-                               value="${settings.endpoint}" 
+                        <input type="text" id="iig_endpoint" class="text_pole flex1"
+                               value="${settings.endpoint}"
                                placeholder="https://api.example.com">
                     </div>
-                    
-                    <!-- API ключ -->
+
                     <div class="flex-row">
                         <label for="iig_api_key">API ключ</label>
-                        <input type="password" id="iig_api_key" class="text_pole flex1" 
+                        <input type="password" id="iig_api_key" class="text_pole flex1"
                                value="${settings.apiKey}">
                         <div id="iig_key_toggle" class="menu_button iig-key-toggle" title="Показать/Скрыть">
                             <i class="fa-solid fa-eye"></i>
                         </div>
                     </div>
-                    
-                    <!-- Модель -->
+
                     <div class="flex-row">
                         <label for="iig_model">Модель</label>
                         <select id="iig_model" class="flex1">
@@ -1984,12 +1783,11 @@ function createSettingsUI() {
                             <i class="fa-solid fa-sync"></i>
                         </div>
                     </div>
-                    
+
                     <hr>
-                    
+
                     <h4>Параметры генерации</h4>
-                    
-                    <!-- Размер -->
+
                     <div class="flex-row">
                         <label for="iig_size">Размер</label>
                         <select id="iig_size" class="flex1">
@@ -1999,8 +1797,7 @@ function createSettingsUI() {
                             <option value="512x512" ${settings.size === '512x512' ? 'selected' : ''}>512x512 (Маленький)</option>
                         </select>
                     </div>
-                    
-                    <!-- Качество -->
+
                     <div class="flex-row">
                         <label for="iig_quality">Качество</label>
                         <select id="iig_quality" class="flex1">
@@ -2008,35 +1805,33 @@ function createSettingsUI() {
                             <option value="hd" ${settings.quality === 'hd' ? 'selected' : ''}>HD</option>
                         </select>
                     </div>
-                    
+
                     <hr>
-                    
+
                     <h4>Стиль и референсы</h4>
-                    
-                    <!-- Default Style -->
+
                     <div class="flex-row">
                         <label for="iig_default_style">Стиль по умолчанию</label>
-                        <textarea id="iig_default_style" class="text_pole flex1" rows="2" 
+                        <textarea id="iig_default_style" class="text_pole flex1" rows="2"
                                   placeholder="semi_realistic, manhwa style, soft lighting, detailed...">${settings.defaultStyle || ''}</textarea>
                     </div>
                     <p class="hint">Добавляется к каждому промпту. Сохраняет одежду, локацию, арт-стиль.</p>
-                    
+
                     <h5>Референсы аватаров</h5>
                     <p class="hint">Отправлять аватарки для консистентности персонажей.</p>
-                    
+
                     <label class="checkbox_label">
                         <input type="checkbox" id="iig_send_char_avatar" ${settings.sendCharAvatar ? 'checked' : ''}>
-                        <span>Отправлять аватар {{char}}</span>
+                        <span>Отправлять аватар персонажа</span>
                     </label>
-                    
+
                     <label class="checkbox_label">
                         <input type="checkbox" id="iig_send_user_avatar" ${settings.sendUserAvatar ? 'checked' : ''}>
-                        <span>Отправлять аватар {{user}}</span>
+                        <span>Отправлять аватар юзера</span>
                     </label>
-                    
-                    <!-- User Avatar Selection -->
+
                     <div id="iig_user_avatar_row" class="flex-row ${!settings.sendUserAvatar ? 'hidden' : ''}" style="margin-top: 5px;">
-                        <label for="iig_user_avatar_file">Аватар {{user}}</label>
+                        <label for="iig_user_avatar_file">Файл аватара</label>
                         <select id="iig_user_avatar_file" class="flex1">
                             <option value="">-- Не выбран --</option>
                             ${settings.userAvatarFile ? `<option value="${settings.userAvatarFile}" selected>${settings.userAvatarFile}</option>` : ''}
@@ -2045,48 +1840,57 @@ function createSettingsUI() {
                             <i class="fa-solid fa-sync"></i>
                         </div>
                     </div>
-                    
+
+                    <div id="iig_user_name_row" class="flex-row ${!settings.sendUserAvatar ? 'hidden' : ''}" style="margin-top: 5px;">
+                        <label for="iig_user_char_name">Имя в промптах</label>
+                        <input type="text" id="iig_user_char_name" class="text_pole flex1"
+                               value="${settings.userCharacterName || ''}"
+                               placeholder="Юзер, MC, User...">
+                    </div>
+                    <p id="iig_user_name_hint" class="hint ${!settings.sendUserAvatar ? 'hidden' : ''}">Имя вашего персонажа как оно появляется в промптах генерации (для правильного сопоставления референса).</p>
+
                     <label class="checkbox_label">
                         <input type="checkbox" id="iig_send_previous_image" ${settings.sendPreviousImage ? 'checked' : ''}>
                         <span>Отправлять предыдущую картинку</span>
                     </label>
-                    <p class="hint">Последняя сгенерированная картинка из чата — для сохранения одежды, локации и т.д.</p>
+                    <p class="hint">Последняя сгенерированная картинка из чата для сохранения одежды, локации и т.д.</p>
+
                     <hr>
-<h5>NPC-референсы</h5>
-<p class="hint">Добавьте NPC с именами и картинками. Референс отправляется автоматически, если имя NPC встречается в промпте генерации.</p>
 
-<div id="iig_npc_list">
-    <!-- Сюда будут динамически добавляться NPC -->
-</div>
+                    <h5>NPC-референсы</h5>
+                    <p class="hint">Добавьте NPC с именами и картинками. Референс отправляется автоматически, если имя NPC встречается в промпте генерации.</p>
 
-<div class="flex-row" style="margin-top: 8px;">
-    <input type="text" id="iig_npc_new_name" class="text_pole flex1" placeholder="Имя NPC (напр. Luca)">
-    <div id="iig_npc_add" class="menu_button" title="Добавить NPC">
-        <i class="fa-solid fa-plus"></i> Добавить
-    </div>
-</div>
-<hr>
-<h5>Референс стиля</h5>
-<p class="hint">Загрузите картинку-пример стиля. Нанобанана будет копировать визуальный стиль с неё.</p>
+                    <div id="iig_npc_list"></div>
 
-<label class="checkbox_label">
-    <input type="checkbox" id="iig_send_style_ref" ${settings.sendStyleReference ? 'checked' : ''}>
-    <span>Отправлять стилевой референс</span>
-</label>
+                    <div class="flex-row" style="margin-top: 8px;">
+                        <input type="text" id="iig_npc_new_name" class="text_pole flex1" placeholder="Имя NPC (напр. Luca)">
+                        <div id="iig_npc_add" class="menu_button" title="Добавить NPC">
+                            <i class="fa-solid fa-plus"></i> Добавить
+                        </div>
+                    </div>
 
-<div id="iig_style_ref_container" class="${!settings.sendStyleReference ? 'hidden' : ''}">
-    <div id="iig_style_ref_list"></div>
-    <div id="iig_style_ref_upload" class="menu_button" style="width:100%;margin-top:5px;">
-        <i class="fa-solid fa-palette"></i> Загрузить картинку стиля
-    </div>
-</div>
                     <hr>
-                    
-                    <!-- Опции для Nano-Banana -->
+
+                    <h5>Референс стиля</h5>
+                    <p class="hint">Загрузите картинку-пример стиля. Нанобанана будет копировать визуальный стиль с неё.</p>
+
+                    <label class="checkbox_label">
+                        <input type="checkbox" id="iig_send_style_ref" ${settings.sendStyleReference ? 'checked' : ''}>
+                        <span>Отправлять стилевой референс</span>
+                    </label>
+
+                    <div id="iig_style_ref_container" class="${!settings.sendStyleReference ? 'hidden' : ''}">
+                        <div id="iig_style_ref_list"></div>
+                        <div id="iig_style_ref_upload" class="menu_button" style="width:100%;margin-top:5px;">
+                            <i class="fa-solid fa-palette"></i> Загрузить картинку стиля
+                        </div>
+                    </div>
+
+                    <hr>
+
                     <div id="iig_gemini_section" class="iig-gemini-section ${settings.apiType !== 'gemini' ? 'hidden' : ''}">
                         <h4>Настройки Nano-Banana</h4>
-                        
-                        <!-- Aspect Ratio -->
+
                         <div class="flex-row">
                             <label for="iig_aspect_ratio">Соотношение сторон</label>
                             <select id="iig_aspect_ratio" class="flex1">
@@ -2102,8 +1906,7 @@ function createSettingsUI() {
                                 <option value="21:9" ${settings.aspectRatio === '21:9' ? 'selected' : ''}>21:9 (Ультраширокий)</option>
                             </select>
                         </div>
-                        
-                        <!-- Image Size -->
+
                         <div class="flex-row">
                             <label for="iig_image_size">Разрешение</label>
                             <select id="iig_image_size" class="flex1">
@@ -2112,32 +1915,28 @@ function createSettingsUI() {
                                 <option value="4K" ${settings.imageSize === '4K' ? 'selected' : ''}>4K</option>
                             </select>
                         </div>
-                        
+
                         <hr>
                     </div>
-                    
-                    <hr>
-                    
+
                     <h4>Обработка ошибок</h4>
-                    
-                    <!-- Макс. повторов -->
+
                     <div class="flex-row">
                         <label for="iig_max_retries">Макс. повторов</label>
-                        <input type="number" id="iig_max_retries" class="text_pole flex1" 
+                        <input type="number" id="iig_max_retries" class="text_pole flex1"
                                value="${settings.maxRetries}" min="0" max="5">
                     </div>
-                    
-                    <!-- Задержка -->
+
                     <div class="flex-row">
                         <label for="iig_retry_delay">Задержка (мс)</label>
-                        <input type="number" id="iig_retry_delay" class="text_pole flex1" 
+                        <input type="number" id="iig_retry_delay" class="text_pole flex1"
                                value="${settings.retryDelay}" min="500" max="10000" step="500">
                     </div>
-                    
+
                     <hr>
-                    
+
                     <h4>Отладка</h4>
-                    
+
                     <div class="flex-row">
                         <div id="iig_export_logs" class="menu_button" style="width: 100%;">
                             <i class="fa-solid fa-download"></i> Экспорт логов
@@ -2148,56 +1947,45 @@ function createSettingsUI() {
             </div>
         </div>
     `;
-    
+
     container.insertAdjacentHTML('beforeend', html);
-    
-    // Bind event handlers
+
     bindSettingsEvents();
 }
 
-/**
- * Bind settings event handlers
- */
 function bindSettingsEvents() {
     const settings = getSettings();
-    
-    // Enable toggle
+
     document.getElementById('iig_enabled')?.addEventListener('change', (e) => {
         settings.enabled = e.target.checked;
         saveSettings();
     });
-    
-    // API Type
+
     document.getElementById('iig_api_type')?.addEventListener('change', (e) => {
         settings.apiType = e.target.value;
         saveSettings();
-        
-        // Show/hide Gemini-specific section
+
         const geminiSection = document.getElementById('iig_gemini_section');
         if (geminiSection) {
             geminiSection.classList.toggle('hidden', e.target.value !== 'gemini');
         }
     });
-    
-    // Default Style
+
     document.getElementById('iig_default_style')?.addEventListener('input', (e) => {
         settings.defaultStyle = e.target.value;
         saveSettings();
     });
-    
-    // Endpoint
+
     document.getElementById('iig_endpoint')?.addEventListener('input', (e) => {
         settings.endpoint = e.target.value;
         saveSettings();
     });
-    
-    // API Key
+
     document.getElementById('iig_api_key')?.addEventListener('input', (e) => {
         settings.apiKey = e.target.value;
         saveSettings();
     });
-    
-    // API Key toggle visibility
+
     document.getElementById('iig_key_toggle')?.addEventListener('click', () => {
         const input = document.getElementById('iig_api_key');
         const icon = document.querySelector('#iig_key_toggle i');
@@ -2209,34 +1997,30 @@ function bindSettingsEvents() {
             icon.classList.replace('fa-eye-slash', 'fa-eye');
         }
     });
-    
-    // Model
+
     document.getElementById('iig_model')?.addEventListener('change', (e) => {
         settings.model = e.target.value;
         saveSettings();
-        
-        // Auto-switch API type based on model
+
         if (isGeminiModel(e.target.value)) {
             document.getElementById('iig_api_type').value = 'gemini';
             settings.apiType = 'gemini';
             document.getElementById('iig_gemini_section')?.classList.remove('hidden');
         }
     });
-    
-    // Refresh models
+
     document.getElementById('iig_refresh_models')?.addEventListener('click', async (e) => {
         const btn = e.currentTarget;
         btn.classList.add('loading');
-        
+
         try {
             const models = await fetchModels();
             const select = document.getElementById('iig_model');
-            
-            // Keep current selection if it exists in new list
+
             const currentModel = settings.model;
-            
+
             select.innerHTML = '<option value="">-- Выберите модель --</option>';
-            
+
             for (const model of models) {
                 const option = document.createElement('option');
                 option.value = model;
@@ -2244,7 +2028,7 @@ function bindSettingsEvents() {
                 option.selected = model === currentModel;
                 select.appendChild(option);
             }
-            
+
             toastr.success(`Найдено моделей: ${models.length}`, 'Генерация картинок');
         } catch (error) {
             toastr.error('Ошибка загрузки моделей', 'Генерация картинок');
@@ -2252,73 +2036,77 @@ function bindSettingsEvents() {
             btn.classList.remove('loading');
         }
     });
-    
-    // Size
+
     document.getElementById('iig_size')?.addEventListener('change', (e) => {
         settings.size = e.target.value;
         saveSettings();
     });
-    
-    // Quality
+
     document.getElementById('iig_quality')?.addEventListener('change', (e) => {
         settings.quality = e.target.value;
         saveSettings();
     });
-    
-    // Aspect Ratio (nano-banana)
+
     document.getElementById('iig_aspect_ratio')?.addEventListener('change', (e) => {
         settings.aspectRatio = e.target.value;
         saveSettings();
     });
-    
-    // Image Size (nano-banana)
+
     document.getElementById('iig_image_size')?.addEventListener('change', (e) => {
         settings.imageSize = e.target.value;
         saveSettings();
     });
-    
-    // Send char avatar
+
     document.getElementById('iig_send_char_avatar')?.addEventListener('change', (e) => {
         settings.sendCharAvatar = e.target.checked;
         saveSettings();
     });
-    
-    // Send user avatar
+
     document.getElementById('iig_send_user_avatar')?.addEventListener('change', (e) => {
         settings.sendUserAvatar = e.target.checked;
         saveSettings();
-        
-        // Show/hide avatar selection row
+
         const avatarRow = document.getElementById('iig_user_avatar_row');
+        const nameRow = document.getElementById('iig_user_name_row');
+        const nameHint = document.getElementById('iig_user_name_hint');
         if (avatarRow) {
             avatarRow.classList.toggle('hidden', !e.target.checked);
         }
+        if (nameRow) {
+            nameRow.classList.toggle('hidden', !e.target.checked);
+        }
+        if (nameHint) {
+            nameHint.classList.toggle('hidden', !e.target.checked);
+        }
     });
-    
-    // User avatar file selection
+
     document.getElementById('iig_user_avatar_file')?.addEventListener('change', (e) => {
         settings.userAvatarFile = e.target.value;
         saveSettings();
     });
-    
-    // Send previous image
+
+    // NEW: User character name input
+    document.getElementById('iig_user_char_name')?.addEventListener('input', (e) => {
+        settings.userCharacterName = e.target.value;
+        saveSettings();
+    });
+
     document.getElementById('iig_send_previous_image')?.addEventListener('change', (e) => {
         settings.sendPreviousImage = e.target.checked;
         saveSettings();
     });
-    
-    // Refresh user avatars list
+
     document.getElementById('iig_refresh_avatars')?.addEventListener('click', async (e) => {
         const btn = e.currentTarget;
         btn.classList.add('loading');
-        
+
         try {
             const avatars = await fetchUserAvatars();
             const select = document.getElementById('iig_user_avatar_file');
             const currentAvatar = settings.userAvatarFile;
-            
+
             select.innerHTML = '<option value="">-- Не выбран --</option>';
-            
+
             for (const avatar of avatars) {
                 const option = document.createElement('option');
                 option.value = avatar;
@@ -2326,7 +2114,7 @@ function bindSettingsEvents() {
                 option.selected = avatar === currentAvatar;
                 select.appendChild(option);
             }
-            
+
             toastr.success(`Найдено аватаров: ${avatars.length}`, 'Генерация картинок');
         } catch (error) {
             toastr.error('Ошибка загрузки аватаров', 'Генерация картинок');
@@ -2334,41 +2122,38 @@ function bindSettingsEvents() {
             btn.classList.remove('loading');
         }
     });
-    
-    // В bindSettingsEvents() add:
-document.getElementById('iig_npc_add')?.addEventListener('click', () => {
-    const nameInput = document.getElementById('iig_npc_new_name');
-    const name = nameInput?.value?.trim();
 
-    if (!name) {
-        toastr.warning('Введите имя NPC', 'NPC');
-        return;
-    }
+    document.getElementById('iig_npc_add')?.addEventListener('click', () => {
+        const nameInput = document.getElementById('iig_npc_new_name');
+        const name = nameInput?.value?.trim();
 
-    const settings = getSettings();
-    if (!settings.npcReferences) {
-        settings.npcReferences = [];
-    }
+        if (!name) {
+            toastr.warning('Введите имя NPC', 'NPC');
+            return;
+        }
 
-    // Проверить дубликат
-    if (settings.npcReferences.some(n => n.name.toLowerCase() === name.toLowerCase())) {
-        toastr.warning(`NPC "${name}" уже существует`, 'NPC');
-        return;
-    }
+        const settings = getSettings();
+        if (!settings.npcReferences) {
+            settings.npcReferences = [];
+        }
 
-    settings.npcReferences.push({
-        name: name,
-        imageData: null,
-        enabled: true
+        if (settings.npcReferences.some(n => n.name.toLowerCase() === name.toLowerCase())) {
+            toastr.warning(`NPC "${name}" уже существует`, 'NPC');
+            return;
+        }
+
+        settings.npcReferences.push({
+            name: name,
+            imageData: null,
+            enabled: true
+        });
+
+        saveSettings();
+        nameInput.value = '';
+        renderNpcList();
+        toastr.success(`NPC "${name}" добавлен. Загрузите картинку!`, 'NPC');
     });
 
-    saveSettings();
-    nameInput.value = '';
-    renderNpcList();
-    toastr.success(`NPC "${name}" добавлен. Загрузите картинку!`, 'NPC');
-});
-
-        // Style reference checkbox toggle
     document.getElementById('iig_send_style_ref')?.addEventListener('change', (e) => {
         settings.sendStyleReference = e.target.checked;
         saveSettings();
@@ -2379,7 +2164,6 @@ document.getElementById('iig_npc_add')?.addEventListener('click', () => {
         }
     });
 
-    // Style reference image upload
     document.getElementById('iig_style_ref_upload')?.addEventListener('click', () => {
         const fileInput = document.createElement('input');
         fileInput.type = 'file';
@@ -2399,7 +2183,6 @@ document.getElementById('iig_npc_add')?.addEventListener('click', () => {
                         settings.styleReferenceImages = [];
                     }
 
-                    // Prompt user for a name (or use filename)
                     const styleName = file.name.replace(/\.[^.]+$/, '') || `style_${Date.now()}`;
 
                     settings.styleReferenceImages.push({
@@ -2420,85 +2203,52 @@ document.getElementById('iig_npc_add')?.addEventListener('click', () => {
         fileInput.click();
     });
 
-
-    // Max retries
     document.getElementById('iig_max_retries')?.addEventListener('input', (e) => {
         settings.maxRetries = parseInt(e.target.value) || 3;
         saveSettings();
     });
-    
-    // Retry delay
+
     document.getElementById('iig_retry_delay')?.addEventListener('input', (e) => {
         settings.retryDelay = parseInt(e.target.value) || 1000;
         saveSettings();
     });
-    
-    // Export logs
+
     document.getElementById('iig_export_logs')?.addEventListener('click', () => {
         exportLogs();
     });
-    
-     // Render dynamic lists on UI load
+
     renderNpcList();
     renderStyleRefList();
 }
 
-/**
- * Initialize extension
- */
 (function init() {
     const context = SillyTavern.getContext();
-    
-    // Debug: log available event types
+
     console.log('[IIG] Available event_types:', context.event_types);
     console.log('[IIG] CHARACTER_MESSAGE_RENDERED:', context.event_types.CHARACTER_MESSAGE_RENDERED);
     console.log('[IIG] MESSAGE_SWIPED:', context.event_types.MESSAGE_SWIPED);
-    
-    // Load settings
+
     getSettings();
-    
-    // Create settings UI when app is ready
+
     context.eventSource.on(context.event_types.APP_READY, () => {
         createSettingsUI();
-        // Add buttons to any messages already in chat
         addButtonsToExistingMessages();
         console.log('[IIG] Inline Image Generation extension loaded');
     });
-    
-    // When chat is loaded/changed, add buttons to all existing messages
+
     context.eventSource.on(context.event_types.CHAT_CHANGED, () => {
         iigLog('INFO', 'CHAT_CHANGED event - adding buttons to existing messages');
-        // Small delay to ensure DOM is ready
         setTimeout(() => {
             addButtonsToExistingMessages();
         }, 100);
     });
-    
-    // Wrapper to add debug logging
+
     const handleMessage = async (messageId) => {
         console.log('[IIG] Event triggered for message:', messageId);
         await onMessageReceived(messageId);
     };
-    
-    // Listen for new messages AFTER they're rendered in DOM
-    // CHARACTER_MESSAGE_RENDERED fires after addOneMessage() completes
-    // This is the ONLY event we handle - no auto-retry on swipe/update
+
     context.eventSource.makeLast(context.event_types.CHARACTER_MESSAGE_RENDERED, handleMessage);
-    
-    // NOTE: We intentionally DO NOT handle MESSAGE_SWIPED or MESSAGE_UPDATED
-    // Swipe = user wants NEW content, not to retry old error images
-    // If user wants to retry failed images, they use the regenerate button in menu
-    
+
     console.log('[IIG] Inline Image Generation extension initialized');
 })();
-
-
-
-
-
-
-
-
-
-
-
