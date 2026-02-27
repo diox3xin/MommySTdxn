@@ -685,13 +685,15 @@ async function generateImageGemini(prompt, style, referenceImages = [], options 
         const refInstruction = `[CRITICAL: The reference image(s) above show the EXACT appearance of the character(s). You MUST precisely copy their: face structure, eye color, hair color and style, skin tone, body type, clothing, and all distinctive features. Do not deviate from the reference appearances.]`;
         fullPrompt = `${refInstruction}\n\n${fullPrompt}`;
     }
-      // Style reference instruction
-    const settings = getSettings();
+
+    // Style reference instruction
     if (settings.sendStyleReference && settings.styleReferenceImages?.length > 0) {
         const styleInstruction = `[STYLE REFERENCE: The reference image(s) show the desired visual STYLE. Match the art style, color palette, linework, rendering technique, and overall aesthetic from these references. Apply this style to all generated content.]`;
         fullPrompt = `${styleInstruction}\n\n${fullPrompt}`;
     }
+
     parts.push({ text: fullPrompt });
+
     
     console.log(`[IIG] Gemini request: ${referenceImages.length} reference image(s) + prompt (${fullPrompt.length} chars)`);
     
@@ -829,30 +831,31 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
     }
     
     // NPC references - send only if NPC name appears in prompt
-if (settings.npcReferences && settings.npcReferences.length > 0) {
-    const promptLower = prompt.toLowerCase();
+    if (settings.npcReferences && settings.npcReferences.length > 0) {
+        const promptLower = prompt.toLowerCase();
 
-    for (const npc of settings.npcReferences) {
-        // Skip those that are turned off and have no picture.
-        if (!npc.enabled || !npc.imageData) continue;
+        for (const npc of settings.npcReferences) {
+            if (!npc.enabled || !npc.imageData) continue;
 
-        // Check: is the NPC's name in the prompt?
-        if (promptLower.includes(npc.name.toLowerCase())) {
-            referenceImages.push(npc.imageData);
-            console.log(`[IIG] NPC "${npc.name}" found in prompt, adding reference`);
+            if (promptLower.includes(npc.name.toLowerCase())) {
+                referenceImages.push(npc.imageData);
+                console.log(`[IIG] NPC "${npc.name}" found in prompt, adding reference`);
+            }
         }
-    }
+    }  
+
     // Style reference - always send when enabled
-if (settings.sendStyleReference && settings.styleReferenceImages?.length > 0) {
-    for (const styleRef of settings.styleReferenceImages) {
-        if (styleRef.imageData) {
-            referenceImages.push(styleRef.imageData);
-            console.log(`[IIG] Style reference "${styleRef.name}" added`);
+    if (settings.sendStyleReference && settings.styleReferenceImages?.length > 0) {
+        for (const styleRef of settings.styleReferenceImages) {
+            if (styleRef.imageData) {
+                referenceImages.push(styleRef.imageData);
+                console.log(`[IIG] Style reference "${styleRef.name}" added`);
+            }
         }
     }
-}
 
     console.log(`[IIG] Total reference images: ${referenceImages.length}`);
+
     
     // Add default style to the style parameter if set
     let finalStyle = style || '';
@@ -2307,6 +2310,7 @@ document.getElementById('iig_npc_add')?.addEventListener('click', () => {
     
     console.log('[IIG] Inline Image Generation extension initialized');
 })();
+
 
 
 
