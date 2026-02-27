@@ -66,6 +66,14 @@ const defaultSettings = Object.freeze({
     // Gemini/nano-banana specific
     aspectRatio: '1:1', // "1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"
     imageSize: '1K', // "1K", "2K", "4K"
+     // NPC References
+    npcReferences: [],
+    // Формат каждого элемента:
+    // { name: "Luca", imageData: "base64...", enabled: true }
+    // Style References
+    styleReferenceImages: [],
+    // Формат: [{ name: "manhwa style", imageData: "base64..." }]
+    sendStyleReference: false,
 });
 
 // Image model detection keywords (from your api_client.py)
@@ -1770,7 +1778,20 @@ function createSettingsUI() {
                         <span>Отправлять предыдущую картинку</span>
                     </label>
                     <p class="hint">Последняя сгенерированная картинка из чата — для сохранения одежды, локации и т.д.</p>
-                    
+                    <hr>
+<h5>NPC-референсы</h5>
+<p class="hint">Добавьте NPC с именами и картинками. Референс отправляется автоматически, если имя NPC встречается в промпте генерации.</p>
+
+<div id="iig_npc_list">
+    <!-- Сюда будут динамически добавляться NPC -->
+</div>
+
+<div class="flex-row" style="margin-top: 8px;">
+    <input type="text" id="iig_npc_new_name" class="text_pole flex1" placeholder="Имя NPC (напр. Luca)">
+    <div id="iig_npc_add" class="menu_button" title="Добавить NPC">
+        <i class="fa-solid fa-plus"></i> Добавить
+    </div>
+</div>
                     <hr>
                     
                     <!-- Опции для Nano-Banana -->
@@ -2092,3 +2113,4 @@ function bindSettingsEvents() {
     
     console.log('[IIG] Inline Image Generation extension initialized');
 })();
+
