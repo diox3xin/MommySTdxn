@@ -1642,6 +1642,121 @@ async function onMessageReceived(messageId) {
     
     await processMessageTags(messageId);
 }
+/**
+ * Render NPC list in settings UI
+ */
+function renderNpcList() {
+    const settings = getSettings();
+    const container = document.getElementById('iig_npc_list');
+    if (!container) return;
+
+    container.innerHTML = '';
+
+    if (!settings.npcReferences || settings.npcReferences.length === 0) {
+        container.innerHTML = '<p style="color:#5a5252;font-size:11px;">Нет добавленных NPC</p>';
+        return;
+    }
+
+    for (let i = 0; i < settings.npcReferences.length; i++) {
+        const npc = settings.npcReferences[i];
+        const row = document.createElement('div');
+        row.className = 'flex-row';
+        row.style.alignItems = 'center';
+        row.style.gap = '8px';
+        row.style.marginBottom = '6px';
+
+        // Checkbox (включён/выключен)
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.checked = npc.enabled !== false;
+        checkbox.addEventListener('change', (e) => {
+            settings.npcReferences[i].enabled = e.target.checked;
+            saveSettings();
+        });
+
+        // Имя
+        const nameSpan = document.createElement('span');
+        nameSpan.textContent = npc.name;
+        nameSpan.style.flex = '1';
+        nameSpan.style.color = '#e8e0e0';
+        nameSpan.style.fontSize = '12px';
+
+        // Превью картинки (если есть)
+        const preview = document.createElement('div');
+        preview.style.width = '32px';
+        preview.style.height = '32px';
+        preview.style.borderRadius = '6px';
+        preview.style.overflow = 'hidden';
+        preview.style.flexShrink = '0';
+        if (npc.imageData) {
+            const img = document.createElement('img');
+            img.src = `data:image/jpeg;base64,${npc.imageData}`;
+            img.style.width = '100%';
+            img.style.height = '100%';
+            img.style.objectFit = 'cover';
+            preview.appendChild(img);
+        } else {
+            preview.style.background = '#2a2a2a';
+            preview.style.display = 'flex';
+            preview.style.alignItems = 'center';
+            preview.style.justifyContent = 'center';
+            preview.innerHTML = '<i class="fa-solid fa-user" style="color:#5a5252;font-size:14px;"></i>';
+        }
+
+        // Кнопка загрузки картинки
+        const uploadBtn = document.createElement('div');
+        uploadBtn.className = 'menu_button';
+        uploadBtn.title = 'Загрузить картинку';
+        uploadBtn.innerHTML = '<i class="fa-solid fa-upload"></i>';
+        uploadBtn.addEventListener('click', () => {
+            const fileInput = document.createElement('input');
+            fileInput.type = 'file';
+            fileInput.accept = 'image/*';
+            fileInput.addEventListener('change', async (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+
+                const reader = new FileReader();
+                reader.onload = async (ev) => {
+                    const base64Full = ev.target.result;
+                    // Сжимаем для хранения
+                    const rawBase64 = base64Full.split(',')[1];
+                    try {
+                        const compressed = await compressImageForReference(rawBase64, 512, 0.7);
+                        settings.npcReferences[i].imageData = compressed;
+                        saveSettings();
+                        renderNpcList(); // Перерисовать
+                        toastr.success(`Картинка для ${npc.name} загружена`, 'NPC');
+                    } catch (err) {
+                        toastr.error('Ошибка сжатия картинки', 'NPC');
+                    }
+                };
+                reader.readAsDataURL(file);
+            });
+            fileInput.click();
+        });
+
+        // Кнопка удаления
+        const deleteBtn = document.createElement('div');
+        deleteBtn.className = 'menu_button';
+        deleteBtn.title = 'Удалить NPC';
+        deleteBtn.innerHTML = '<i class="fa-solid fa-trash"></i>';
+        deleteBtn.style.color = '#cc5555';
+        deleteBtn.addEventListener('click', () => {
+            settings.npcReferences.splice(i, 1);
+            saveSettings();
+            renderNpcList();
+            toastr.info(`NPC "${npc.name}" удалён`, 'NPC');
+        });
+
+        row.appendChild(checkbox);
+        row.appendChild(preview);
+        row.appendChild(nameSpan);
+        row.appendChild(uploadBtn);
+        row.appendChild(deleteBtn);
+        container.appendChild(row);
+    }
+}
 
 /**
  * Create settings UI
@@ -2113,4 +2228,5 @@ function bindSettingsEvents() {
     
     console.log('[IIG] Inline Image Generation extension initialized');
 })();
+
 
