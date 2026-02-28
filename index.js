@@ -1723,6 +1723,33 @@ function renderStyleRefList() {
     }
 }
 
+function updateUserAvatarPreview() {
+    const settings = getSettings();
+    const preview = document.getElementById('iig-user-avatar-preview');
+    if (!preview) return;
+    if (!settings.userAvatarFile) {
+        preview.style.display = 'none';
+        return;
+    }
+    const img = preview.querySelector('img');
+    img.src = `/User Avatars/${encodeURIComponent(settings.userAvatarFile)}`;
+    preview.style.display = '';
+}
+
+function updateCharAvatarPreview() {
+    const context = SillyTavern.getContext();
+    const preview = document.getElementById('iig-char-avatar-preview');
+    if (!preview) return;
+    const character = context.characters?.[context.characterId];
+    if (character?.avatar) {
+        const img = preview.querySelector('img');
+        img.src = `/characters/${encodeURIComponent(character.avatar)}`;
+        preview.style.display = '';
+    } else {
+        preview.style.display = 'none';
+    }
+}
+
 function createSettingsUI() {
     const settings = getSettings();
     const context = SillyTavern.getContext();
@@ -1820,10 +1847,15 @@ function createSettingsUI() {
                     <h5>Референсы аватаров</h5>
                     <p class="hint">Отправлять аватарки для консистентности персонажей.</p>
 
-                    <label class="checkbox_label">
-                        <input type="checkbox" id="iig_send_char_avatar" ${settings.sendCharAvatar ? 'checked' : ''}>
-                        <span>Отправлять аватар персонажа</span>
-                    </label>
+                    <div class="flex-row" style="align-items:center; gap:8px;">
+                        <label class="checkbox_label" style="flex:1; margin:0;">
+                            <input type="checkbox" id="iig_send_char_avatar" ${settings.sendCharAvatar ? 'checked' : ''}>
+                            <span>Отправлять аватар персонажа</span>
+                        </label>
+                        <div id="iig-char-avatar-preview" class="iig-avatar-preview" style="display:none;">
+                            <img src="" alt="char" />
+                        </div>
+                    </div>
 
                     <label class="checkbox_label">
                         <input type="checkbox" id="iig_send_user_avatar" ${settings.sendUserAvatar ? 'checked' : ''}>
@@ -1838,6 +1870,9 @@ function createSettingsUI() {
                         </select>
                         <div id="iig_refresh_avatars" class="menu_button iig-refresh-btn" title="Обновить список">
                             <i class="fa-solid fa-sync"></i>
+                        </div>
+                        <div id="iig-user-avatar-preview" class="iig-avatar-preview" style="display:none;">
+                            <img src="" alt="user" />
                         </div>
                     </div>
 
@@ -1951,6 +1986,8 @@ function createSettingsUI() {
     container.insertAdjacentHTML('beforeend', html);
 
     bindSettingsEvents();
+    updateUserAvatarPreview();
+    updateCharAvatarPreview();
 }
 
 function bindSettingsEvents() {
@@ -2083,6 +2120,7 @@ function bindSettingsEvents() {
     document.getElementById('iig_user_avatar_file')?.addEventListener('change', (e) => {
         settings.userAvatarFile = e.target.value;
         saveSettings();
+        updateUserAvatarPreview();
     });
 
     // NEW: User character name input
@@ -2116,6 +2154,7 @@ function bindSettingsEvents() {
             }
 
             toastr.success(`Найдено аватаров: ${avatars.length}`, 'Генерация картинок');
+            updateUserAvatarPreview();
         } catch (error) {
             toastr.error('Ошибка загрузки аватаров', 'Генерация картинок');
         } finally {
@@ -2241,6 +2280,7 @@ function bindSettingsEvents() {
         setTimeout(() => {
             addButtonsToExistingMessages();
         }, 100);
+        setTimeout(updateCharAvatarPreview, 200);
     });
 
     const handleMessage = async (messageId) => {
