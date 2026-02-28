@@ -1723,19 +1723,6 @@ function renderStyleRefList() {
     }
 }
 
-function updateUserAvatarPreview() {
-    const settings = getSettings();
-    const preview = document.getElementById('iig-user-avatar-preview');
-    if (!preview) return;
-    if (!settings.userAvatarFile) {
-        preview.style.display = 'none';
-        return;
-    }
-    const img = preview.querySelector('img');
-    img.src = `/User Avatars/${encodeURIComponent(settings.userAvatarFile)}`;
-    preview.style.display = '';
-}
-
 function updateCharAvatarPreview() {
     const context = SillyTavern.getContext();
     const preview = document.getElementById('iig-char-avatar-preview');
@@ -1748,6 +1735,102 @@ function updateCharAvatarPreview() {
     } else {
         preview.style.display = 'none';
     }
+}
+function renderAvatarDropdown(avatars = []) {
+    const settings = getSettings();
+    const list = document.getElementById('iig_avatar_dropdown_list');
+    if (!list) return;
+
+    list.innerHTML = '';
+
+    // Опция "Не выбран"
+    const emptyItem = document.createElement('div');
+    emptyItem.className = `iig-avatar-dropdown-item iig-no-avatar ${!settings.userAvatarFile ? 'selected' : ''}`;
+    emptyItem.dataset.value = '';
+    emptyItem.innerHTML = `
+        <div style="width:36px;height:36px;border-radius:5px;background:rgba(255,255,255,0.03);display:flex;align-items:center;justify-content:center;flex-shrink:0;">
+            <i class="fa-solid fa-ban" style="color:#5a5252;font-size:12px;"></i>
+        </div>
+        <span class="iig-item-name">-- Не выбран --</span>
+    `;
+    emptyItem.addEventListener('click', () => selectAvatar('', null));
+    list.appendChild(emptyItem);
+
+    // Аватары с превью
+    for (const avatarFile of avatars) {
+        const item = document.createElement('div');
+        item.className = `iig-avatar-dropdown-item ${settings.userAvatarFile === avatarFile ? 'selected' : ''}`;
+        item.dataset.value = avatarFile;
+
+        const thumb = document.createElement('img');
+        thumb.className = 'iig-item-thumb';
+        thumb.src = `/User Avatars/${encodeURIComponent(avatarFile)}`;
+        thumb.alt = avatarFile;
+        thumb.loading = 'lazy';
+        thumb.onerror = function() {
+            this.style.display = 'none';
+        };
+
+        const name = document.createElement('span');
+        name.className = 'iig-item-name';
+        name.textContent = avatarFile;
+
+        item.appendChild(thumb);
+        item.appendChild(name);
+
+        item.addEventListener('click', () => selectAvatar(avatarFile, thumb.src));
+        list.appendChild(item);
+    }
+}
+
+async function loadAndRenderAvatars() {
+    try {
+        const avatars = await fetchUserAvatars();
+        renderAvatarDropdown(avatars);
+        iigLog('INFO', `Loaded ${avatars.length} user avatars for dropdown`);
+    } catch (error) {
+        iigLog('ERROR', 'Failed to load avatars for dropdown:', error.message);
+        toastr.error('Ошибка загрузки аватаров', 'Генерация картинок');
+    }
+}
+
+
+function selectAvatar(avatarFile, thumbSrc) {
+    const settings = getSettings();
+    settings.userAvatarFile = avatarFile;
+    saveSettings();
+
+    // Обновить selected display
+    const selected = document.getElementById('iig_avatar_dropdown_selected');
+    if (selected) {
+        if (avatarFile) {
+            selected.innerHTML = `
+                <img class="iig-dropdown-thumb" src="/User Avatars/${encodeURIComponent(avatarFile)}" alt="" onerror="this.style.display='none'">
+                <span class="iig-dropdown-text">${avatarFile}</span>
+                <span class="iig-dropdown-arrow fa-solid fa-chevron-down"></span>
+            `;
+        } else {
+            selected.innerHTML = `
+                <div class="iig-dropdown-placeholder"><i class="fa-solid fa-user"></i></div>
+                <span class="iig-dropdown-text">-- Не выбран --</span>
+                <span class="iig-dropdown-arrow fa-solid fa-chevron-down"></span>
+            `;
+        }
+    }
+
+    // Обновить selected class в списке
+    const list = document.getElementById('iig_avatar_dropdown_list');
+    if (list) {
+        list.querySelectorAll('.iig-avatar-dropdown-item').forEach(item => {
+            item.classList.toggle('selected', item.dataset.value === avatarFile);
+        });
+    }
+
+    // Закрыть dropdown
+    const dropdown = document.getElementById('iig_avatar_dropdown');
+    if (dropdown) dropdown.classList.remove('open');
+
+    iigLog('INFO', `User avatar selected: "${avatarFile}"`);
 }
 
 function createSettingsUI() {
@@ -1862,19 +1945,22 @@ function createSettingsUI() {
                         <span>Отправлять аватар юзера</span>
                     </label>
 
-                    <div id="iig_user_avatar_row" class="flex-row ${!settings.sendUserAvatar ? 'hidden' : ''}" style="margin-top: 5px;">
-                        <label for="iig_user_avatar_file">Файл аватара</label>
-                        <select id="iig_user_avatar_file" class="flex1">
-                            <option value="">-- Не выбран --</option>
-                            ${settings.userAvatarFile ? `<option value="${settings.userAvatarFile}" selected>${settings.userAvatarFile}</option>` : ''}
-                        </select>
-                        <div id="iig_refresh_avatars" class="menu_button iig-refresh-btn" title="Обновить список">
-                            <i class="fa-solid fa-sync"></i>
-                        </div>
-                        <div id="iig-user-avatar-preview" class="iig-avatar-preview" style="display:none;">
-                            <img src="" alt="user" />
-                        </div>
-                    </div>
+                    <div id="iig_user_avatar_row" class="flex-row ${!settings.sendUserAvatar ? 'hidden' : ''}" style="margin-top: 5px; align-items: center;">
+    <label>Файл аватара</label>
+    <div id="iig_avatar_dropdown" class="iig-avatar-dropdown">
+        <div id="iig_avatar_dropdown_selected" class="iig-avatar-dropdown-selected">
+            ${settings.userAvatarFile
+                ? `<img class="iig-dropdown-thumb" src="/User Avatars/${encodeURIComponent(settings.userAvatarFile)}" alt="" onerror="this.style.display='none'">`
+                : '<div class="iig-dropdown-placeholder"><i class="fa-solid fa-user"></i></div>'}
+            <span class="iig-dropdown-text">${settings.userAvatarFile || '-- Не выбран --'}</span>
+            <span class="iig-dropdown-arrow fa-solid fa-chevron-down"></span>
+        </div>
+        <div id="iig_avatar_dropdown_list" class="iig-avatar-dropdown-list"></div>
+    </div>
+    <div id="iig_refresh_avatars" class="menu_button iig-refresh-btn" title="Обновить список">
+        <i class="fa-solid fa-sync"></i>
+    </div>
+</div>
 
                     <div id="iig_user_name_row" class="flex-row ${!settings.sendUserAvatar ? 'hidden' : ''}" style="margin-top: 5px;">
                         <label for="iig_user_char_name">Имя в промптах</label>
@@ -2117,12 +2203,6 @@ function bindSettingsEvents() {
         }
     });
 
-    document.getElementById('iig_user_avatar_file')?.addEventListener('change', (e) => {
-        settings.userAvatarFile = e.target.value;
-        saveSettings();
-        updateUserAvatarPreview();
-    });
-
     // NEW: User character name input
     document.getElementById('iig_user_char_name')?.addEventListener('input', (e) => {
         settings.userCharacterName = e.target.value;
@@ -2134,33 +2214,43 @@ function bindSettingsEvents() {
         saveSettings();
     });
 
-    document.getElementById('iig_refresh_avatars')?.addEventListener('click', async (e) => {
-        const btn = e.currentTarget;
-        btn.classList.add('loading');
+   // Открытие/закрытие dropdown
+document.getElementById('iig_avatar_dropdown_selected')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const dropdown = document.getElementById('iig_avatar_dropdown');
+    if (dropdown) {
+        const wasOpen = dropdown.classList.contains('open');
+        dropdown.classList.toggle('open');
 
-        try {
-            const avatars = await fetchUserAvatars();
-            const select = document.getElementById('iig_user_avatar_file');
-            const currentAvatar = settings.userAvatarFile;
-
-            select.innerHTML = '<option value="">-- Не выбран --</option>';
-
-            for (const avatar of avatars) {
-                const option = document.createElement('option');
-                option.value = avatar;
-                option.textContent = avatar;
-                option.selected = avatar === currentAvatar;
-                select.appendChild(option);
-            }
-
-            toastr.success(`Найдено аватаров: ${avatars.length}`, 'Генерация картинок');
-            updateUserAvatarPreview();
-        } catch (error) {
-            toastr.error('Ошибка загрузки аватаров', 'Генерация картинок');
-        } finally {
-            btn.classList.remove('loading');
+        // Если открываем впервые и список пуст - загрузить аватары
+        const list = document.getElementById('iig_avatar_dropdown_list');
+        if (!wasOpen && list && list.children.length === 0) {
+            loadAndRenderAvatars();
         }
-    });
+    }
+});
+
+// Закрытие при клике снаружи
+document.addEventListener('click', (e) => {
+    const dropdown = document.getElementById('iig_avatar_dropdown');
+    if (dropdown && !dropdown.contains(e.target)) {
+        dropdown.classList.remove('open');
+    }
+});
+
+// Кнопка обновления
+document.getElementById('iig_refresh_avatars')?.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    const btn = e.currentTarget;
+    btn.classList.add('loading');
+    await loadAndRenderAvatars();
+    btn.classList.remove('loading');
+    toastr.success('Аватары обновлены', 'Генерация картинок');
+
+    // Открыть dropdown чтобы показать результат
+    const dropdown = document.getElementById('iig_avatar_dropdown');
+    if (dropdown) dropdown.classList.add('open');
+});
 
     document.getElementById('iig_npc_add')?.addEventListener('click', () => {
         const nameInput = document.getElementById('iig_npc_new_name');
@@ -2270,6 +2360,7 @@ function bindSettingsEvents() {
     getSettings();
 
     context.eventSource.on(context.event_types.APP_READY, () => {
+        injectCustomStyles();
         createSettingsUI();
         addButtonsToExistingMessages();
         console.log('[IIG] Inline Image Generation extension loaded');
@@ -2292,3 +2383,4 @@ function bindSettingsEvents() {
 
     console.log('[IIG] Inline Image Generation extension initialized');
 })();
+
