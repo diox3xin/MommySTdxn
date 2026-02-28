@@ -2360,7 +2360,6 @@ document.getElementById('iig_refresh_avatars')?.addEventListener('click', async 
     getSettings();
 
     context.eventSource.on(context.event_types.APP_READY, () => {
-        injectCustomStyles();
         createSettingsUI();
         addButtonsToExistingMessages();
         console.log('[IIG] Inline Image Generation extension loaded');
@@ -2383,4 +2382,5 @@ document.getElementById('iig_refresh_avatars')?.addEventListener('click', async 
 
     console.log('[IIG] Inline Image Generation extension initialized');
 })();
+
 
