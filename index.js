@@ -436,8 +436,8 @@ async function saveImageToFile(dataUrl) {
         }
     }
 
-    // FIX: Do NOT use regex with capturing groups on multi-megabyte base64 strings —
-    // JS regex engine recurses internally and throws "Maximum call stack size exceeded".
+    // FIX: Never use regex with capturing groups on multi-MB base64 strings —
+    // JS regex recurses internally and throws "Maximum call stack size exceeded".
     const DATA_PREFIX = 'data:image/';
     const BASE64_MARKER = ';base64,';
     if (!dataUrl || !dataUrl.startsWith(DATA_PREFIX)) {
@@ -446,7 +446,7 @@ async function saveImageToFile(dataUrl) {
     }
     const base64MarkerIdx = dataUrl.indexOf(BASE64_MARKER);
     if (base64MarkerIdx === -1) {
-        console.error('[IIG] No base64 marker found in data URL');
+        console.error('[IIG] No base64 marker in data URL');
         throw new Error('Invalid data URL format');
     }
     const format = dataUrl.substring(DATA_PREFIX.length, base64MarkerIdx);
@@ -1137,12 +1137,12 @@ async function parseImageTags(text, options = {}) {
         const hasPath = srcValue && srcValue.startsWith('/') && srcValue.length > 5;
 
         if (hasErrorImage && !forceAll) {
-            // FIX: Treat error images as needing generation (not as "done").
-            // Previously this skipped error images, causing messages that failed on first
-            // attempt to never auto-retry. Now they are included just like [IMG:GEN] tags.
-            needsGeneration = true;
-            iigLog('INFO', `Error image found, will retry generation: ${srcValue.substring(0, 50)}`);
-        } else if (forceAll) {
+            iigLog('INFO', `Skipping error image (click to retry): ${srcValue.substring(0, 50)}`);
+            searchPos = imgEnd;
+            continue;
+        }
+
+        if (forceAll) {
             needsGeneration = true;
             iigLog('INFO', `Force regeneration mode: including ${srcValue.substring(0, 30)}`);
         } else if (hasMarker || !srcValue) {
@@ -1365,6 +1365,8 @@ async function processMessageTags(messageId) {
         return;
     }
 
+    let failedTagsCount = 0;
+
     const processTag = async (tag, index) => {
         const tagId = `iig-${messageId}-${index}`;
 
@@ -1533,6 +1535,7 @@ async function processMessageTags(messageId) {
             iigLog('INFO', `Successfully generated image for tag ${index}`);
             toastr.success(`Картинка ${index + 1}/${tags.length} готова`, 'Генерация картинок', { timeOut: 2000 });
         } catch (error) {
+            failedTagsCount++;
             iigLog('ERROR', `Failed to generate image for tag ${index}:`, error.message);
 
             const errorPlaceholder = createErrorPlaceholder(tagId, error.message, tag);
@@ -1557,11 +1560,17 @@ async function processMessageTags(messageId) {
         iigLog('ERROR', `Unexpected error processing tags for message ${messageId}:`, err.message);
     }
 
-    // FIX: Mark as processed BEFORE saveChat to prevent re-entry from any
-    // DOM events triggered by saving
-    processedMessages.add(messageId);
+    // FIX: Only mark as processed if ALL tags succeeded.
+    // If any tag failed, do NOT add to processedMessages so the next event trigger
+    // (e.g. from message swiping or chat reload) will retry the failed tags.
+    // processedMessages is only for preventing duplicate concurrent runs, not for
+    // permanently blocking retries after failures.
+    if (failedTagsCount === 0) {
+        processedMessages.add(messageId);
+    } else {
+        iigLog('WARN', `${failedTagsCount}/${tags.length} tags failed — NOT marking message ${messageId} as processed so it can be retried`);
+    }
 
-    // FIX: Only delete from processingMessages AFTER all side-effects are done
     await context.saveChat();
     processingMessages.delete(messageId);
 
@@ -1708,8 +1717,6 @@ async function onMessageReceived(messageId) {
         iigLog('INFO', 'Extension disabled, skipping');
         return;
     }
-
-    const context = SillyTavern.getContext();
 
     // FIX: CHARACTER_MESSAGE_RENDERED can fire before the DOM element exists.
     // Retry up to 5 times with increasing delay before giving up.
