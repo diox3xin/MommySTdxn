@@ -436,14 +436,19 @@ async function saveImageToFile(dataUrl) {
         }
     }
 
-    const match = dataUrl.match(/^data:image\/(\w+);base64,(.+)$/);
-    if (!match) {
+    // FIX: Do NOT use regex (.+) on a potentially multi-megabyte base64 string —
+    // V8's regex engine recurses internally and throws "Maximum call stack size exceeded".
+    // Use indexOf/substring instead.
+    const commaIdx = dataUrl.indexOf(',');
+    const headerPart = commaIdx !== -1 ? dataUrl.substring(0, commaIdx) : '';
+    const headerMatch = headerPart.match(/^data:image\/(\w+);base64$/);
+    if (!headerMatch || commaIdx === -1) {
         console.error('[IIG] Invalid data URL, starts with:', dataUrl?.substring(0, 100));
         throw new Error('Invalid data URL format');
     }
 
-    const format = match[1];
-    const base64Data = match[2];
+    const format = headerMatch[1];
+    const base64Data = dataUrl.substring(commaIdx + 1);
 
     console.log(`[IIG] Saving image: format=${format}, base64 length=${base64Data.length}`);
 
