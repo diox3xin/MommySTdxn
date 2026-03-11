@@ -222,7 +222,7 @@ async function compressImageForReference(base64Data, maxSize = 1024, quality = 0
                 resolve(compressedBase64);
             };
             img.onerror = () => reject(new Error('Failed to load image for compression'));
-            // FIX 2: Was hardcoded to image/png — JPEG avatars fail silently (onerror) and reference is dropped
+            // FIX 2: hardcoded PNG breaks JPEG avatars — use detectMimeType
             const _mime = detectMimeType(base64Data);
             img.src = `data:${_mime};base64,${base64Data}`;
         } catch (error) {
@@ -438,8 +438,7 @@ async function saveImageToFile(dataUrl) {
         }
     }
 
-    // FIX 1: regex with (.+)$ on multi-MB base64 string causes "Maximum call stack size exceeded"
-    // JS regex engine recurses internally for capturing groups on huge strings.
+    // FIX 1: regex with (.+)$ on multi-MB base64 causes "Maximum call stack size exceeded"
     const DATA_PREFIX = 'data:image/';
     const BASE64_MARKER = ';base64,';
     if (!dataUrl || !dataUrl.startsWith(DATA_PREFIX)) {
@@ -447,10 +446,7 @@ async function saveImageToFile(dataUrl) {
         throw new Error('Invalid data URL format');
     }
     const _b64idx = dataUrl.indexOf(BASE64_MARKER);
-    if (_b64idx === -1) {
-        console.error('[IIG] No base64 marker in data URL');
-        throw new Error('Invalid data URL format');
-    }
+    if (_b64idx === -1) { console.error('[IIG] No base64 marker'); throw new Error('Invalid data URL format'); }
     const format = dataUrl.substring(DATA_PREFIX.length, _b64idx);
     const base64Data = dataUrl.substring(_b64idx + BASE64_MARKER.length);
 
@@ -1139,10 +1135,9 @@ async function parseImageTags(text, options = {}) {
         const hasPath = srcValue && srcValue.startsWith('/') && srcValue.length > 5;
 
         if (hasErrorImage && !forceAll) {
-            // FIX 3: Previously skipped error images, causing messages that failed auto-generation
-            // to never retry automatically. Now treat as needs-generation same as [IMG:GEN].
+            // FIX 3: error.svg was silently skipped, blocking auto-retry forever
             needsGeneration = true;
-            iigLog('INFO', `Error image — will retry generation: ${srcValue.substring(0, 50)}`);
+            iigLog('INFO', `Error image — will retry: ${srcValue.substring(0, 50)}`);
         } else if (forceAll) {
             needsGeneration = true;
             iigLog('INFO', `Force regeneration mode: including ${srcValue.substring(0, 30)}`);
@@ -1560,14 +1555,12 @@ async function processMessageTags(messageId) {
         iigLog('ERROR', `Unexpected error processing tags for message ${messageId}:`, err.message);
     }
 
-    // FIX 4: Only mark as fully processed if ALL tags succeeded.
-    // If any failed, leave out of processedMessages so next event trigger retries them.
+    // FIX 4: only mark processed if ALL tags succeeded
     if (_failedTags === 0) {
         processedMessages.add(messageId);
     } else {
-        iigLog('WARN', `${_failedTags}/${tags.length} tag(s) failed — NOT marking message ${messageId} as processed, will retry`);
+        iigLog('WARN', `${_failedTags}/${tags.length} tag(s) failed — NOT marking ${messageId} as processed, will retry`);
     }
-
     await context.saveChat();
     processingMessages.delete(messageId);
 
@@ -1715,7 +1708,7 @@ async function onMessageReceived(messageId) {
         return;
     }
 
-    // FIX 5: CHARACTER_MESSAGE_RENDERED can fire before DOM element exists — retry
+    // FIX 5: event fires before DOM element exists — retry with delays
     let messageElement = document.querySelector(`#chat .mes[mesid="${messageId}"]`);
     if (!messageElement) {
         let _found = false;
@@ -1724,12 +1717,8 @@ async function onMessageReceived(messageId) {
             messageElement = document.querySelector(`#chat .mes[mesid="${messageId}"]`);
             if (messageElement) { _found = true; break; }
         }
-        if (!_found) {
-            iigLog('WARN', `Message element ${messageId} never appeared in DOM`);
-            return;
-        }
+        if (!_found) { iigLog('WARN', `Message element ${messageId} never appeared in DOM`); return; }
     }
-
     addRegenerateButton(messageElement, messageId);
     await processMessageTags(messageId);
 }
@@ -2582,6 +2571,20 @@ function bindSettingsEvents() {
     };
 
     context.eventSource.makeLast(context.event_types.CHARACTER_MESSAGE_RENDERED, handleMessage);
+
+    // FIX 6: Subscribe to MESSAGE_SWIPED — fires when user rerolls a message.
+    // Must clear processedMessages for that messageId so the new swipe content gets processed.
+    if (context.event_types.MESSAGE_SWIPED) {
+        context.eventSource.on(context.event_types.MESSAGE_SWIPED, async (messageId) => {
+            iigLog('INFO', `MESSAGE_SWIPED: ${messageId} — clearing cache and processing`);
+            processedMessages.delete(messageId);
+            processingMessages.delete(messageId);
+            await onMessageReceived(messageId);
+        });
+    }
+
+    // Also handle CHARACTER_MESSAGE_RENDERED for swipes (some ST versions use this for both)
+    // processedMessages.delete is safe to call multiple times
 
     console.log('[IIG] Inline Image Generation extension initialized');
 })();
