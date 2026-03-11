@@ -79,6 +79,7 @@ const defaultSettings = Object.freeze({
     npcReferences: [],
     styleReferenceImages: [],
     sendStyleReference: false,
+    apiPresets: [],
 });
 
 const IMAGE_MODEL_KEYWORDS = [
@@ -226,6 +227,176 @@ async function compressImageForReference(base64Data, maxSize = 1024, quality = 0
             reject(error);
         }
     });
+}
+
+function saveCurrentAsPreset(presetName) {
+    const settings = getSettings();
+
+    if (!presetName || !presetName.trim()) {
+        toastr.warning('Введите название пресета', 'Пресеты API');
+        return false;
+    }
+
+    presetName = presetName.trim();
+
+    if (!settings.apiPresets) {
+        settings.apiPresets = [];
+    }
+
+    // Проверить дубликат
+    const existingIndex = settings.apiPresets.findIndex(
+        p => p.name.toLowerCase() === presetName.toLowerCase()
+    );
+
+    const preset = {
+        name: presetName,
+        endpoint: settings.endpoint,
+        apiKey: settings.apiKey,
+        model: settings.model,
+        apiType: settings.apiType,
+    };
+
+    if (existingIndex !== -1) {
+        settings.apiPresets[existingIndex] = preset;
+        toastr.info(`Пресет "${presetName}" обновлён`, 'Пресеты API');
+    } else {
+        settings.apiPresets.push(preset);
+        toastr.success(`Пресет "${presetName}" сохранён`, 'Пресеты API');
+    }
+
+    saveSettings();
+    renderPresetList();
+    return true;
+}
+
+function loadPreset(index) {
+    const settings = getSettings();
+
+    if (!settings.apiPresets || !settings.apiPresets[index]) {
+        toastr.error('Пресет не найден', 'Пресеты API');
+        return;
+    }
+
+    const preset = settings.apiPresets[index];
+
+    settings.endpoint = preset.endpoint;
+    settings.apiKey = preset.apiKey;
+    settings.model = preset.model;
+    settings.apiType = preset.apiType;
+
+    saveSettings();
+
+    // Обновить UI поля
+    const endpointEl = document.getElementById('iig_endpoint');
+    const apiKeyEl = document.getElementById('iig_api_key');
+    const modelEl = document.getElementById('iig_model');
+    const apiTypeEl = document.getElementById('iig_api_type');
+
+    if (endpointEl) endpointEl.value = preset.endpoint;
+    if (apiKeyEl) apiKeyEl.value = preset.apiKey;
+    if (apiTypeEl) {
+        apiTypeEl.value = preset.apiType;
+        const geminiSection = document.getElementById('iig_gemini_section');
+        if (geminiSection) {
+            geminiSection.classList.toggle('hidden', preset.apiType !== 'gemini');
+        }
+    }
+    if (modelEl) {
+        // Если модели нет в списке — добавить как опцию
+        let found = false;
+        for (const opt of modelEl.options) {
+            if (opt.value === preset.model) {
+                found = true;
+                break;
+            }
+        }
+        if (!found && preset.model) {
+            const option = document.createElement('option');
+            option.value = preset.model;
+            option.textContent = preset.model;
+            modelEl.appendChild(option);
+        }
+        modelEl.value = preset.model;
+    }
+
+    toastr.success(`Пресет "${preset.name}" загружен`, 'Пресеты API');
+    iigLog('INFO', `Loaded API preset: "${preset.name}" (${preset.apiType}, ${preset.endpoint})`);
+}
+
+function deletePreset(index) {
+    const settings = getSettings();
+
+    if (!settings.apiPresets || !settings.apiPresets[index]) return;
+
+    const name = settings.apiPresets[index].name;
+    settings.apiPresets.splice(index, 1);
+    saveSettings();
+    renderPresetList();
+    toastr.info(`Пресет "${name}" удалён`, 'Пресеты API');
+}
+
+function renderPresetList() {
+    const settings = getSettings();
+    const container = document.getElementById('iig_preset_list');
+    if (!container) return;
+
+    container.innerHTML = '';
+
+    if (!settings.apiPresets || settings.apiPresets.length === 0) {
+        container.innerHTML = '<p style="color:#5a5252;font-size:11px;">Нет сохранённых пресетов</p>';
+        return;
+    }
+
+    for (let i = 0; i < settings.apiPresets.length; i++) {
+        const preset = settings.apiPresets[i];
+        const row = document.createElement('div');
+        row.style.display = 'flex';
+        row.style.alignItems = 'center';
+        row.style.gap = '8px';
+        row.style.marginBottom = '6px';
+
+        const nameSpan = document.createElement('span');
+        nameSpan.style.flex = '1';
+        nameSpan.style.color = '#e8e0e0';
+        nameSpan.style.fontSize = '12px';
+        nameSpan.style.overflow = 'hidden';
+        nameSpan.style.textOverflow = 'ellipsis';
+        nameSpan.style.whiteSpace = 'nowrap';
+
+        const typeBadge = preset.apiType === 'gemini' ? '🍌' : '🤖';
+        const maskedKey = preset.apiKey
+            ? preset.apiKey.substring(0, 4) + '••••' + preset.apiKey.slice(-4)
+            : 'нет ключа';
+        nameSpan.textContent = `${typeBadge} ${preset.name}`;
+        nameSpan.title = `${preset.endpoint}\nМодель: ${preset.model}\nКлюч: ${maskedKey}`;
+
+        const loadBtn = document.createElement('div');
+        loadBtn.className = 'menu_button';
+        loadBtn.title = 'Загрузить пресет';
+        loadBtn.innerHTML = '<i class="fa-solid fa-download"></i>';
+        loadBtn.addEventListener('click', () => loadPreset(i));
+
+        const updateBtn = document.createElement('div');
+        updateBtn.className = 'menu_button';
+        updateBtn.title = 'Перезаписать текущими настройками';
+        updateBtn.innerHTML = '<i class="fa-solid fa-pen"></i>';
+        updateBtn.addEventListener('click', () => {
+            saveCurrentAsPreset(preset.name);
+        });
+
+        const deleteBtn = document.createElement('div');
+        deleteBtn.className = 'menu_button';
+        deleteBtn.title = 'Удалить пресет';
+        deleteBtn.innerHTML = '<i class="fa-solid fa-trash"></i>';
+        deleteBtn.style.color = '#cc5555';
+        deleteBtn.addEventListener('click', () => deletePreset(i));
+
+        row.appendChild(nameSpan);
+        row.appendChild(loadBtn);
+        row.appendChild(updateBtn);
+        row.appendChild(deleteBtn);
+        container.appendChild(row);
+    }
 }
 
 function detectMimeType(base64Data) {
@@ -1842,6 +2013,20 @@ function createSettingsUI() {
 
                     <hr>
 
+                    <h4>Пресеты API</h4>
+                    <p class="hint">Сохраняйте комбинации эндпоинт + ключ + модель для быстрого переключения между прокси.</p>
+
+                    <div id="iig_preset_list"></div>
+
+                    <div class="flex-row" style="margin-top: 8px;">
+                        <input type="text" id="iig_preset_new_name" class="text_pole flex1" placeholder="Название пресета (напр. OpenRouter, Gemini...)">
+                        <div id="iig_preset_save" class="menu_button" title="Сохранить текущие настройки как пресет">
+                            <i class="fa-solid fa-floppy-disk"></i> Сохранить
+                        </div>
+                    </div>
+
+                    <hr>
+
                     <h4>Настройки API</h4>
 
                     <div class="flex-row">
@@ -2322,7 +2507,24 @@ function bindSettingsEvents() {
     document.getElementById('iig_export_logs')?.addEventListener('click', () => {
         exportLogs();
     });
+    document.getElementById('iig_preset_save')?.addEventListener('click', () => {
+        const nameInput = document.getElementById('iig_preset_new_name');
+        const name = nameInput?.value?.trim();
 
+        if (saveCurrentAsPreset(name)) {
+            nameInput.value = '';
+        }
+    });
+
+    // Enter по полю ввода тоже сохраняет
+    document.getElementById('iig_preset_new_name')?.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            document.getElementById('iig_preset_save')?.click();
+        }
+    });
+
+    renderPresetList();
     renderNpcList();
     renderStyleRefList();
 }
@@ -2362,3 +2564,4 @@ function bindSettingsEvents() {
 
     console.log('[IIG] Inline Image Generation extension initialized');
 })();
+
