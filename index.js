@@ -436,19 +436,21 @@ async function saveImageToFile(dataUrl) {
         }
     }
 
-    // FIX: Do NOT use regex (.+) on a potentially multi-megabyte base64 string —
-    // V8's regex engine recurses internally and throws "Maximum call stack size exceeded".
-    // Use indexOf/substring instead.
-    const commaIdx = dataUrl.indexOf(',');
-    const headerPart = commaIdx !== -1 ? dataUrl.substring(0, commaIdx) : '';
-    const headerMatch = headerPart.match(/^data:image\/(\w+);base64$/);
-    if (!headerMatch || commaIdx === -1) {
+    // FIX: Do NOT use regex with capturing groups on multi-megabyte base64 strings —
+    // JS regex engine recurses internally and throws "Maximum call stack size exceeded".
+    const DATA_PREFIX = 'data:image/';
+    const BASE64_MARKER = ';base64,';
+    if (!dataUrl || !dataUrl.startsWith(DATA_PREFIX)) {
         console.error('[IIG] Invalid data URL, starts with:', dataUrl?.substring(0, 100));
         throw new Error('Invalid data URL format');
     }
-
-    const format = headerMatch[1];
-    const base64Data = dataUrl.substring(commaIdx + 1);
+    const base64MarkerIdx = dataUrl.indexOf(BASE64_MARKER);
+    if (base64MarkerIdx === -1) {
+        console.error('[IIG] No base64 marker found in data URL');
+        throw new Error('Invalid data URL format');
+    }
+    const format = dataUrl.substring(DATA_PREFIX.length, base64MarkerIdx);
+    const base64Data = dataUrl.substring(base64MarkerIdx + BASE64_MARKER.length);
 
     console.log(`[IIG] Saving image: format=${format}, base64 length=${base64Data.length}`);
 
@@ -1135,12 +1137,12 @@ async function parseImageTags(text, options = {}) {
         const hasPath = srcValue && srcValue.startsWith('/') && srcValue.length > 5;
 
         if (hasErrorImage && !forceAll) {
-            iigLog('INFO', `Skipping error image (click to retry): ${srcValue.substring(0, 50)}`);
-            searchPos = imgEnd;
-            continue;
-        }
-
-        if (forceAll) {
+            // FIX: Treat error images as needing generation (not as "done").
+            // Previously this skipped error images, causing messages that failed on first
+            // attempt to never auto-retry. Now they are included just like [IMG:GEN] tags.
+            needsGeneration = true;
+            iigLog('INFO', `Error image found, will retry generation: ${srcValue.substring(0, 50)}`);
+        } else if (forceAll) {
             needsGeneration = true;
             iigLog('INFO', `Force regeneration mode: including ${srcValue.substring(0, 30)}`);
         } else if (hasMarker || !srcValue) {
@@ -1708,10 +1710,22 @@ async function onMessageReceived(messageId) {
     }
 
     const context = SillyTavern.getContext();
-    const message = context.chat[messageId];
 
-    const messageElement = document.querySelector(`#chat .mes[mesid="${messageId}"]`);
-    if (!messageElement) return;
+    // FIX: CHARACTER_MESSAGE_RENDERED can fire before the DOM element exists.
+    // Retry up to 5 times with increasing delay before giving up.
+    let messageElement = document.querySelector(`#chat .mes[mesid="${messageId}"]`);
+    if (!messageElement) {
+        let found = false;
+        for (const delay of [100, 300, 600, 1000, 2000]) {
+            await new Promise(resolve => setTimeout(resolve, delay));
+            messageElement = document.querySelector(`#chat .mes[mesid="${messageId}"]`);
+            if (messageElement) { found = true; break; }
+        }
+        if (!found) {
+            iigLog('WARN', `Message element ${messageId} never appeared in DOM, giving up`);
+            return;
+        }
+    }
 
     addRegenerateButton(messageElement, messageId);
 
