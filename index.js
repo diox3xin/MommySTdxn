@@ -222,10 +222,9 @@ async function compressImageForReference(base64Data, maxSize = 1024, quality = 0
                 resolve(compressedBase64);
             };
             img.onerror = () => reject(new Error('Failed to load image for compression'));
-            // FIX: Was hardcoded to image/png, but avatars/NPC images are usually JPEG.
-            // Wrong mime type causes img.onerror → reference silently dropped.
-            const mimeType = detectMimeType(base64Data);
-            img.src = `data:${mimeType};base64,${base64Data}`;
+            // FIX 2: Was hardcoded to image/png — JPEG avatars fail silently (onerror) and reference is dropped
+            const _mime = detectMimeType(base64Data);
+            img.src = `data:${_mime};base64,${base64Data}`;
         } catch (error) {
             reject(error);
         }
@@ -439,20 +438,21 @@ async function saveImageToFile(dataUrl) {
         }
     }
 
-    // FIX: Never use regex with capturing groups on multi-MB base64 strings.
+    // FIX 1: regex with (.+)$ on multi-MB base64 string causes "Maximum call stack size exceeded"
+    // JS regex engine recurses internally for capturing groups on huge strings.
     const DATA_PREFIX = 'data:image/';
     const BASE64_MARKER = ';base64,';
     if (!dataUrl || !dataUrl.startsWith(DATA_PREFIX)) {
         console.error('[IIG] Invalid data URL, starts with:', dataUrl?.substring(0, 100));
         throw new Error('Invalid data URL format');
     }
-    const base64MarkerIdx = dataUrl.indexOf(BASE64_MARKER);
-    if (base64MarkerIdx === -1) {
+    const _b64idx = dataUrl.indexOf(BASE64_MARKER);
+    if (_b64idx === -1) {
         console.error('[IIG] No base64 marker in data URL');
         throw new Error('Invalid data URL format');
     }
-    const format = dataUrl.substring(DATA_PREFIX.length, base64MarkerIdx);
-    const base64Data = dataUrl.substring(base64MarkerIdx + BASE64_MARKER.length);
+    const format = dataUrl.substring(DATA_PREFIX.length, _b64idx);
+    const base64Data = dataUrl.substring(_b64idx + BASE64_MARKER.length);
 
     console.log(`[IIG] Saving image: format=${format}, base64 length=${base64Data.length}`);
 
@@ -1139,8 +1139,10 @@ async function parseImageTags(text, options = {}) {
         const hasPath = srcValue && srcValue.startsWith('/') && srcValue.length > 5;
 
         if (hasErrorImage && !forceAll) {
+            // FIX 3: Previously skipped error images, causing messages that failed auto-generation
+            // to never retry automatically. Now treat as needs-generation same as [IMG:GEN].
             needsGeneration = true;
-            iigLog('INFO', `Error image found, will retry: ${srcValue.substring(0, 50)}`);
+            iigLog('INFO', `Error image — will retry generation: ${srcValue.substring(0, 50)}`);
         } else if (forceAll) {
             needsGeneration = true;
             iigLog('INFO', `Force regeneration mode: including ${srcValue.substring(0, 30)}`);
@@ -1364,8 +1366,7 @@ async function processMessageTags(messageId) {
         return;
     }
 
-    let failedTagsCount = 0;
-
+    let _failedTags = 0;
     const processTag = async (tag, index) => {
         const tagId = `iig-${messageId}-${index}`;
 
@@ -1534,7 +1535,7 @@ async function processMessageTags(messageId) {
             iigLog('INFO', `Successfully generated image for tag ${index}`);
             toastr.success(`Картинка ${index + 1}/${tags.length} готова`, 'Генерация картинок', { timeOut: 2000 });
         } catch (error) {
-            failedTagsCount++;
+            _failedTags++;
             iigLog('ERROR', `Failed to generate image for tag ${index}:`, error.message);
 
             const errorPlaceholder = createErrorPlaceholder(tagId, error.message, tag);
@@ -1559,10 +1560,12 @@ async function processMessageTags(messageId) {
         iigLog('ERROR', `Unexpected error processing tags for message ${messageId}:`, err.message);
     }
 
-    if (failedTagsCount === 0) {
+    // FIX 4: Only mark as fully processed if ALL tags succeeded.
+    // If any failed, leave out of processedMessages so next event trigger retries them.
+    if (_failedTags === 0) {
         processedMessages.add(messageId);
     } else {
-        iigLog('WARN', `${failedTagsCount}/${tags.length} tags failed — NOT marking ${messageId} as processed so it can retry`);
+        iigLog('WARN', `${_failedTags}/${tags.length} tag(s) failed — NOT marking message ${messageId} as processed, will retry`);
     }
 
     await context.saveChat();
@@ -1712,17 +1715,17 @@ async function onMessageReceived(messageId) {
         return;
     }
 
-    // FIX: Event can fire before DOM element exists — retry with increasing delays
+    // FIX 5: CHARACTER_MESSAGE_RENDERED can fire before DOM element exists — retry
     let messageElement = document.querySelector(`#chat .mes[mesid="${messageId}"]`);
     if (!messageElement) {
-        let found = false;
-        for (const delay of [100, 300, 600, 1000, 2000]) {
-            await new Promise(resolve => setTimeout(resolve, delay));
+        let _found = false;
+        for (const _delay of [100, 300, 600, 1000, 2000]) {
+            await new Promise(r => setTimeout(r, _delay));
             messageElement = document.querySelector(`#chat .mes[mesid="${messageId}"]`);
-            if (messageElement) { found = true; break; }
+            if (messageElement) { _found = true; break; }
         }
-        if (!found) {
-            iigLog('WARN', `Message element ${messageId} never appeared in DOM, giving up`);
+        if (!_found) {
+            iigLog('WARN', `Message element ${messageId} never appeared in DOM`);
             return;
         }
     }
