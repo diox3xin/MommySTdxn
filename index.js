@@ -222,7 +222,10 @@ async function compressImageForReference(base64Data, maxSize = 1024, quality = 0
                 resolve(compressedBase64);
             };
             img.onerror = () => reject(new Error('Failed to load image for compression'));
-            img.src = `data:image/png;base64,${base64Data}`;
+            // FIX: Was hardcoded to image/png, but avatars/NPC images are usually JPEG.
+            // Wrong mime type causes img.onerror → reference silently dropped.
+            const mimeType = detectMimeType(base64Data);
+            img.src = `data:${mimeType};base64,${base64Data}`;
         } catch (error) {
             reject(error);
         }
@@ -436,8 +439,7 @@ async function saveImageToFile(dataUrl) {
         }
     }
 
-    // FIX: Never use regex with capturing groups on multi-MB base64 strings —
-    // JS regex recurses internally and throws "Maximum call stack size exceeded".
+    // FIX: Never use regex with capturing groups on multi-MB base64 strings.
     const DATA_PREFIX = 'data:image/';
     const BASE64_MARKER = ';base64,';
     if (!dataUrl || !dataUrl.startsWith(DATA_PREFIX)) {
@@ -1137,12 +1139,9 @@ async function parseImageTags(text, options = {}) {
         const hasPath = srcValue && srcValue.startsWith('/') && srcValue.length > 5;
 
         if (hasErrorImage && !forceAll) {
-            iigLog('INFO', `Skipping error image (click to retry): ${srcValue.substring(0, 50)}`);
-            searchPos = imgEnd;
-            continue;
-        }
-
-        if (forceAll) {
+            needsGeneration = true;
+            iigLog('INFO', `Error image found, will retry: ${srcValue.substring(0, 50)}`);
+        } else if (forceAll) {
             needsGeneration = true;
             iigLog('INFO', `Force regeneration mode: including ${srcValue.substring(0, 30)}`);
         } else if (hasMarker || !srcValue) {
@@ -1560,15 +1559,10 @@ async function processMessageTags(messageId) {
         iigLog('ERROR', `Unexpected error processing tags for message ${messageId}:`, err.message);
     }
 
-    // FIX: Only mark as processed if ALL tags succeeded.
-    // If any tag failed, do NOT add to processedMessages so the next event trigger
-    // (e.g. from message swiping or chat reload) will retry the failed tags.
-    // processedMessages is only for preventing duplicate concurrent runs, not for
-    // permanently blocking retries after failures.
     if (failedTagsCount === 0) {
         processedMessages.add(messageId);
     } else {
-        iigLog('WARN', `${failedTagsCount}/${tags.length} tags failed — NOT marking message ${messageId} as processed so it can be retried`);
+        iigLog('WARN', `${failedTagsCount}/${tags.length} tags failed — NOT marking ${messageId} as processed so it can retry`);
     }
 
     await context.saveChat();
@@ -1718,8 +1712,7 @@ async function onMessageReceived(messageId) {
         return;
     }
 
-    // FIX: CHARACTER_MESSAGE_RENDERED can fire before the DOM element exists.
-    // Retry up to 5 times with increasing delay before giving up.
+    // FIX: Event can fire before DOM element exists — retry with increasing delays
     let messageElement = document.querySelector(`#chat .mes[mesid="${messageId}"]`);
     if (!messageElement) {
         let found = false;
@@ -1735,7 +1728,6 @@ async function onMessageReceived(messageId) {
     }
 
     addRegenerateButton(messageElement, messageId);
-
     await processMessageTags(messageId);
 }
 
