@@ -3,6 +3,7 @@
  *
  * Catches [IMG:GEN:{json}] tags in AI messages and generates images via configured API.
  * Supports OpenAI-compatible and Gemini-compatible (nano-banana) endpoints.
+ *
  */
 
 const MODULE_NAME = 'inline_image_gen';
@@ -12,6 +13,10 @@ const processingMessages = new Set();
 
 // Track messages that have already been fully processed to prevent re-entry after DOM changes
 const processedMessages = new Set();
+
+// [FIX-I] Debounce timestamps per messageId to prevent rapid re-entry
+const messageDebounceMap = new Map();
+const DEBOUNCE_MS = 2000;
 
 // Log buffer for debugging
 const logBuffer = [];
@@ -55,6 +60,21 @@ function exportLogs() {
     a.click();
     URL.revokeObjectURL(url);
     toastr.success('Логи экспортированы', 'Генерация картинок');
+}
+
+// [FIX-C] Decode common HTML entities that sanitizers/renderers may inject
+function decodeHtmlEntities(text) {
+    if (!text) return text;
+    return text
+        .replace(/&quot;/g, '"')
+        .replace(/&#34;/g, '"')
+        .replace(/&apos;/g, "'")
+        .replace(/&#39;/g, "'")
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&#x27;/g, "'")
+        .replace(/&#x22;/g, '"');
 }
 
 // Default settings
@@ -191,6 +211,15 @@ async function imageUrlToBase64(url) {
     }
 }
 
+function detectMimeType(base64Data) {
+    if (!base64Data || base64Data.length < 4) return 'image/png';
+    if (base64Data.startsWith('/9j/')) return 'image/jpeg';
+    if (base64Data.startsWith('iVBOR')) return 'image/png';
+    if (base64Data.startsWith('UklGR')) return 'image/webp';
+    if (base64Data.startsWith('R0lGOD')) return 'image/gif';
+    return 'image/png';
+}
+
 async function compressImageForReference(base64Data, maxSize = 1024, quality = 0.8) {
     return new Promise((resolve, reject) => {
         try {
@@ -222,7 +251,6 @@ async function compressImageForReference(base64Data, maxSize = 1024, quality = 0
                 resolve(compressedBase64);
             };
             img.onerror = () => reject(new Error('Failed to load image for compression'));
-            // FIX 2: hardcoded PNG breaks JPEG avatars — use detectMimeType
             const _mime = detectMimeType(base64Data);
             img.src = `data:${_mime};base64,${base64Data}`;
         } catch (error) {
@@ -245,7 +273,6 @@ function saveCurrentAsPreset(presetName) {
         settings.apiPresets = [];
     }
 
-    // Проверить дубликат
     const existingIndex = settings.apiPresets.findIndex(
         p => p.name.toLowerCase() === presetName.toLowerCase()
     );
@@ -288,7 +315,6 @@ function loadPreset(index) {
 
     saveSettings();
 
-    // Обновить UI поля
     const endpointEl = document.getElementById('iig_endpoint');
     const apiKeyEl = document.getElementById('iig_api_key');
     const modelEl = document.getElementById('iig_model');
@@ -304,7 +330,6 @@ function loadPreset(index) {
         }
     }
     if (modelEl) {
-        // Если модели нет в списке — добавить как опцию
         let found = false;
         for (const opt of modelEl.options) {
             if (opt.value === preset.model) {
@@ -401,15 +426,6 @@ function renderPresetList() {
     }
 }
 
-function detectMimeType(base64Data) {
-    if (!base64Data || base64Data.length < 4) return 'image/png';
-    if (base64Data.startsWith('/9j/')) return 'image/jpeg';
-    if (base64Data.startsWith('iVBOR')) return 'image/png';
-    if (base64Data.startsWith('UklGR')) return 'image/webp';
-    if (base64Data.startsWith('R0lGOD')) return 'image/gif';
-    return 'image/png';
-}
-
 async function saveImageToFile(dataUrl) {
     const context = SillyTavern.getContext();
 
@@ -438,7 +454,7 @@ async function saveImageToFile(dataUrl) {
         }
     }
 
-    // FIX 1: regex with (.+)$ on multi-MB base64 causes "Maximum call stack size exceeded"
+    // FIX 1 (original): regex with (.+)$ on multi-MB base64 causes stack overflow — use indexOf
     const DATA_PREFIX = 'data:image/';
     const BASE64_MARKER = ';base64,';
     if (!dataUrl || !dataUrl.startsWith(DATA_PREFIX)) {
@@ -1054,226 +1070,328 @@ async function parseImageTags(text, options = {}) {
     const { checkExistence = false, forceAll = false } = options;
     const tags = [];
 
+    if (!text) return tags;
+
+    // [FIX-C] Decode HTML entities in text before parsing to handle sanitized content
+    const decodedText = decodeHtmlEntities(text);
+    // We'll parse on decodedText but store original fullMatch from `text` for replace operations
+
     // --- New format: <img data-iig-instruction='...' ...> ---
-    const imgTagMarker = 'data-iig-instruction=';
-    let searchPos = 0;
+    // [FIX-K] Search in both original and decoded text
+    const textsToSearch = [text];
+    if (decodedText !== text) {
+        textsToSearch.push(decodedText);
+    }
 
-    while (true) {
-        const markerPos = text.indexOf(imgTagMarker, searchPos);
-        if (markerPos === -1) break;
+    const foundPrompts = new Set(); // deduplicate across original/decoded
 
-        let imgStart = text.lastIndexOf('<img', markerPos);
-        if (imgStart === -1 || markerPos - imgStart > 500) {
-            searchPos = markerPos + 1;
-            continue;
-        }
+    for (const searchText of textsToSearch) {
+        const imgTagMarker = 'data-iig-instruction=';
+        let searchPos = 0;
 
-        const afterMarker = markerPos + imgTagMarker.length;
-        let jsonStart = text.indexOf('{', afterMarker);
-        if (jsonStart === -1 || jsonStart > afterMarker + 10) {
-            searchPos = markerPos + 1;
-            continue;
-        }
+        while (true) {
+            const markerPos = searchText.indexOf(imgTagMarker, searchPos);
+            if (markerPos === -1) break;
 
-        let braceCount = 0;
-        let jsonEnd = -1;
-        let inString = false;
-        let escapeNext = false;
+            let imgStart = searchText.lastIndexOf('<img', markerPos);
+            // [FIX-C] Also try &lt;img for encoded HTML
+            if (imgStart === -1 || markerPos - imgStart > 500) {
+                const encodedImgStart = searchText.lastIndexOf('&lt;img', markerPos);
+                if (encodedImgStart !== -1 && markerPos - encodedImgStart <= 500) {
+                    imgStart = encodedImgStart;
+                } else {
+                    searchPos = markerPos + 1;
+                    continue;
+                }
+            }
 
-        for (let i = jsonStart; i < text.length; i++) {
-            const char = text[i];
+            const afterMarker = markerPos + imgTagMarker.length;
 
-            if (escapeNext) {
-                escapeNext = false;
+            // [FIX-K] Handle both single-quote and double-quote wrapped attributes
+            let quoteChar = searchText[afterMarker];
+            let jsonSearchStart = afterMarker;
+            if (quoteChar === "'" || quoteChar === '"') {
+                jsonSearchStart = afterMarker + 1;
+            }
+
+            let jsonStart = searchText.indexOf('{', jsonSearchStart);
+            if (jsonStart === -1 || jsonStart > jsonSearchStart + 10) {
+                searchPos = markerPos + 1;
                 continue;
             }
 
-            if (char === '\\' && inString) {
-                escapeNext = true;
-                continue;
-            }
+            let braceCount = 0;
+            let jsonEnd = -1;
+            let inString = false;
+            let escapeNext = false;
 
-            if (char === '"') {
-                inString = !inString;
-                continue;
-            }
+            for (let i = jsonStart; i < searchText.length; i++) {
+                const char = searchText[i];
 
-            if (!inString) {
-                if (char === '{') {
-                    braceCount++;
-                } else if (char === '}') {
-                    braceCount--;
-                    if (braceCount === 0) {
-                        jsonEnd = i + 1;
-                        break;
+                if (escapeNext) {
+                    escapeNext = false;
+                    continue;
+                }
+
+                if (char === '\\' && inString) {
+                    escapeNext = true;
+                    continue;
+                }
+
+                if (char === '"') {
+                    inString = !inString;
+                    continue;
+                }
+
+                if (!inString) {
+                    if (char === '{') {
+                        braceCount++;
+                    } else if (char === '}') {
+                        braceCount--;
+                        if (braceCount === 0) {
+                            jsonEnd = i + 1;
+                            break;
+                        }
                     }
                 }
             }
-        }
 
-        if (jsonEnd === -1) {
-            searchPos = markerPos + 1;
-            continue;
-        }
-
-        let imgEnd = text.indexOf('>', jsonEnd);
-        if (imgEnd === -1) {
-            searchPos = markerPos + 1;
-            continue;
-        }
-        imgEnd++;
-
-        const fullImgTag = text.substring(imgStart, imgEnd);
-        const instructionJson = text.substring(jsonStart, jsonEnd);
-
-        const srcMatch = fullImgTag.match(/src\s*=\s*["']?([^"'\s>]+)/i);
-        const srcValue = srcMatch ? srcMatch[1] : '';
-
-        let needsGeneration = false;
-        const hasMarker = srcValue.includes('[IMG:GEN]') || srcValue.includes('[IMG:');
-        const hasErrorImage = srcValue.includes('error.svg');
-        const hasPath = srcValue && srcValue.startsWith('/') && srcValue.length > 5;
-
-        if (hasErrorImage && !forceAll) {
-            // FIX 3: error.svg was silently skipped, blocking auto-retry forever
-            needsGeneration = true;
-            iigLog('INFO', `Error image — will retry: ${srcValue.substring(0, 50)}`);
-        } else if (forceAll) {
-            needsGeneration = true;
-            iigLog('INFO', `Force regeneration mode: including ${srcValue.substring(0, 30)}`);
-        } else if (hasMarker || !srcValue) {
-            needsGeneration = true;
-        } else if (hasPath && checkExistence) {
-            const exists = await checkFileExists(srcValue);
-            if (!exists) {
-                iigLog('WARN', `File does not exist (LLM hallucination?): ${srcValue}`);
-                needsGeneration = true;
-            } else {
-                iigLog('INFO', `Skipping existing image: ${srcValue.substring(0, 50)}`);
+            if (jsonEnd === -1) {
+                searchPos = markerPos + 1;
+                continue;
             }
-        } else if (hasPath) {
-            iigLog('INFO', `Skipping path (no existence check): ${srcValue.substring(0, 50)}`);
+
+            // Find the end of the img tag
+            let imgEnd = searchText.indexOf('>', jsonEnd);
+            // [FIX-C] Also check for &gt;
+            if (imgEnd === -1) {
+                imgEnd = searchText.indexOf('&gt;', jsonEnd);
+                if (imgEnd !== -1) imgEnd += 4; // length of &gt;
+            }
+            if (imgEnd === -1) {
+                searchPos = markerPos + 1;
+                continue;
+            }
+            if (searchText[imgEnd] === '>') imgEnd++; // move past >
+
+            const fullImgTag = searchText.substring(imgStart, imgEnd);
+            const instructionJson = searchText.substring(jsonStart, jsonEnd);
+
+            const srcMatch = fullImgTag.match(/src\s*=\s*["']?([^"'\s>]+)/i);
+            const srcValue = srcMatch ? srcMatch[1] : '';
+
+            let needsGeneration = false;
+            const hasMarker = srcValue.includes('[IMG:GEN]') || srcValue.includes('[IMG:');
+            const hasErrorImage = srcValue.includes('error.svg');
+            const hasPath = srcValue && srcValue.startsWith('/') && srcValue.length > 5;
+
+            if (hasErrorImage && !forceAll) {
+                needsGeneration = true;
+                iigLog('INFO', `Error image found, will retry: ${srcValue.substring(0, 50)}`);
+            } else if (forceAll) {
+                needsGeneration = true;
+                iigLog('INFO', `Force regeneration mode: including ${srcValue.substring(0, 30)}`);
+            } else if (hasMarker || !srcValue) {
+                needsGeneration = true;
+            } else if (hasPath && checkExistence) {
+                const exists = await checkFileExists(srcValue);
+                if (!exists) {
+                    iigLog('WARN', `File does not exist (LLM hallucination?): ${srcValue}`);
+                    needsGeneration = true;
+                } else {
+                    iigLog('INFO', `Skipping existing image: ${srcValue.substring(0, 50)}`);
+                }
+            } else if (hasPath) {
+                iigLog('INFO', `Skipping path (no existence check): ${srcValue.substring(0, 50)}`);
+                searchPos = imgEnd;
+                continue;
+            }
+
+            if (!needsGeneration) {
+                searchPos = imgEnd;
+                continue;
+            }
+
+            try {
+                // [FIX-C] Decode HTML entities in JSON before parsing
+                let normalizedJson = decodeHtmlEntities(instructionJson)
+                    .replace(/\u201c/g, '"')
+                    .replace(/\u2018/g, "'")
+                    .replace(/\u2019/g, "'")
+                    .replace(/\u201d/g, '"');
+
+                const data = JSON.parse(normalizedJson);
+
+                const promptKey = (data.prompt || '').substring(0, 60);
+                if (foundPrompts.has(promptKey)) {
+                    // Deduplicate: already found this tag in another pass
+                    searchPos = imgEnd;
+                    continue;
+                }
+                foundPrompts.add(promptKey);
+
+                // [FIX-G] Store BOTH original and decoded fullMatch for replace operations
+                let originalFullMatch = fullImgTag;
+                // Try to find the exact match in the original text
+                if (searchText !== text) {
+                    // We're searching decoded text; find corresponding range in original
+                    // Best effort: search for the instruction JSON in original text
+                    const origMarkerPos = text.indexOf(imgTagMarker);
+                    if (origMarkerPos !== -1) {
+                        let origImgStart = text.lastIndexOf('<img', origMarkerPos);
+                        if (origImgStart === -1) origImgStart = text.lastIndexOf('&lt;img', origMarkerPos);
+                        let origImgEnd = text.indexOf('>', origMarkerPos + imgTagMarker.length + instructionJson.length);
+                        if (origImgEnd === -1) origImgEnd = text.indexOf('&gt;', origMarkerPos + imgTagMarker.length + instructionJson.length);
+                        if (origImgStart !== -1 && origImgEnd !== -1) {
+                            if (text[origImgEnd] === '>') origImgEnd++;
+                            else origImgEnd += 4; // &gt;
+                            originalFullMatch = text.substring(origImgStart, origImgEnd);
+                        }
+                    }
+                }
+
+                tags.push({
+                    fullMatch: originalFullMatch,
+                    fullMatchDecoded: fullImgTag, // [FIX-G] decoded version for fallback
+                    index: imgStart,
+                    style: data.style || '',
+                    prompt: data.prompt || '',
+                    aspectRatio: data.aspect_ratio || data.aspectRatio || null,
+                    imageSize: data.image_size || data.imageSize || null,
+                    quality: data.quality || null,
+                    isNewFormat: true,
+                    existingSrc: hasPath ? srcValue : null
+                });
+
+                iigLog('INFO', `Found NEW format tag: ${data.prompt?.substring(0, 50)}`);
+            } catch (e) {
+                iigLog('WARN', `Failed to parse instruction JSON: ${instructionJson.substring(0, 100)}`, e.message);
+            }
+
             searchPos = imgEnd;
-            continue;
         }
-
-        if (!needsGeneration) {
-            searchPos = imgEnd;
-            continue;
-        }
-
-        try {
-            let normalizedJson = instructionJson
-                .replace(/\u201c/g, '"')
-                .replace(/\u2018/g, "'")
-                .replace(/\u2019/g, "'")
-                .replace(/\u201d/g, '"')
-                .replace(/&amp;/g, '&');
-
-            const data = JSON.parse(normalizedJson);
-
-            tags.push({
-                fullMatch: fullImgTag,
-                index: imgStart,
-                style: data.style || '',
-                prompt: data.prompt || '',
-                aspectRatio: data.aspect_ratio || data.aspectRatio || null,
-                imageSize: data.image_size || data.imageSize || null,
-                quality: data.quality || null,
-                isNewFormat: true,
-                existingSrc: hasPath ? srcValue : null
-            });
-
-            iigLog('INFO', `Found NEW format tag: ${data.prompt?.substring(0, 50)}`);
-        } catch (e) {
-            iigLog('WARN', `Failed to parse instruction JSON: ${instructionJson.substring(0, 100)}`, e.message);
-        }
-
-        searchPos = imgEnd;
     }
 
     // --- Legacy format: [IMG:GEN:{...}] ---
-    const marker = '[IMG:GEN:';
-    let searchStart = 0;
+    const legacyTextsToSearch = [text];
+    if (decodedText !== text) legacyTextsToSearch.push(decodedText);
 
-    while (true) {
-        const markerIndex = text.indexOf(marker, searchStart);
-        if (markerIndex === -1) break;
+    for (const searchText of legacyTextsToSearch) {
+        const marker = '[IMG:GEN:';
+        let searchStart = 0;
 
-        const jsonStart = markerIndex + marker.length;
+        while (true) {
+            const markerIndex = searchText.indexOf(marker, searchStart);
+            if (markerIndex === -1) break;
 
-        let braceCount = 0;
-        let jsonEnd = -1;
-        let inString = false;
-        let escapeNext = false;
+            const jsonStart = markerIndex + marker.length;
 
-        for (let i = jsonStart; i < text.length; i++) {
-            const char = text[i];
+            let braceCount = 0;
+            let jsonEnd = -1;
+            let inString = false;
+            let escapeNext = false;
 
-            if (escapeNext) {
-                escapeNext = false;
-                continue;
-            }
+            for (let i = jsonStart; i < searchText.length; i++) {
+                const char = searchText[i];
 
-            if (char === '\\' && inString) {
-                escapeNext = true;
-                continue;
-            }
+                if (escapeNext) {
+                    escapeNext = false;
+                    continue;
+                }
 
-            if (char === '"') {
-                inString = !inString;
-                continue;
-            }
+                if (char === '\\' && inString) {
+                    escapeNext = true;
+                    continue;
+                }
 
-            if (!inString) {
-                if (char === '{') {
-                    braceCount++;
-                } else if (char === '}') {
-                    braceCount--;
-                    if (braceCount === 0) {
-                        jsonEnd = i + 1;
-                        break;
+                if (char === '"') {
+                    inString = !inString;
+                    continue;
+                }
+
+                if (!inString) {
+                    if (char === '{') {
+                        braceCount++;
+                    } else if (char === '}') {
+                        braceCount--;
+                        if (braceCount === 0) {
+                            jsonEnd = i + 1;
+                            break;
+                        }
                     }
                 }
             }
+
+            if (jsonEnd === -1) {
+                searchStart = jsonStart;
+                continue;
+            }
+
+            const jsonStr = searchText.substring(jsonStart, jsonEnd);
+
+            const afterJson = searchText.substring(jsonEnd);
+            if (!afterJson.startsWith(']')) {
+                searchStart = jsonEnd;
+                continue;
+            }
+
+            const tagOnly = searchText.substring(markerIndex, jsonEnd + 1);
+
+            try {
+                // [FIX-C] Decode entities before JSON parse
+                const normalizedJson = decodeHtmlEntities(jsonStr).replace(/'/g, '"');
+                const data = JSON.parse(normalizedJson);
+
+                const promptKey = 'legacy:' + (data.prompt || '').substring(0, 60);
+                if (foundPrompts.has(promptKey)) {
+                    searchStart = jsonEnd + 1;
+                    continue;
+                }
+                foundPrompts.add(promptKey);
+
+                // [FIX-G] Find original match in original text
+                let originalTagOnly = tagOnly;
+                if (searchText !== text) {
+                    const origIdx = text.indexOf(marker);
+                    if (origIdx !== -1) {
+                        // Try to find matching ] after JSON
+                        let origJsonEnd = -1;
+                        let bc = 0; let ins = false; let esc = false;
+                        for (let i = origIdx + marker.length; i < text.length; i++) {
+                            const c = text[i];
+                            if (esc) { esc = false; continue; }
+                            if (c === '\\' && ins) { esc = true; continue; }
+                            if (c === '"') { ins = !ins; continue; }
+                            if (!ins) {
+                                if (c === '{') bc++;
+                                else if (c === '}') { bc--; if (bc === 0) { origJsonEnd = i + 1; break; } }
+                            }
+                        }
+                        if (origJsonEnd !== -1 && text[origJsonEnd] === ']') {
+                            originalTagOnly = text.substring(origIdx, origJsonEnd + 1);
+                        }
+                    }
+                }
+
+                tags.push({
+                    fullMatch: originalTagOnly,
+                    fullMatchDecoded: tagOnly,
+                    index: markerIndex,
+                    style: data.style || '',
+                    prompt: data.prompt || '',
+                    aspectRatio: data.aspect_ratio || data.aspectRatio || null,
+                    imageSize: data.image_size || data.imageSize || null,
+                    quality: data.quality || null,
+                    isNewFormat: false
+                });
+
+                iigLog('INFO', `Found LEGACY format tag: ${data.prompt?.substring(0, 50)}`);
+            } catch (e) {
+                iigLog('WARN', `Failed to parse legacy tag JSON: ${jsonStr.substring(0, 100)}`, e.message);
+            }
+
+            searchStart = jsonEnd + 1;
         }
-
-        if (jsonEnd === -1) {
-            searchStart = jsonStart;
-            continue;
-        }
-
-        const jsonStr = text.substring(jsonStart, jsonEnd);
-
-        const afterJson = text.substring(jsonEnd);
-        if (!afterJson.startsWith(']')) {
-            searchStart = jsonEnd;
-            continue;
-        }
-
-        const tagOnly = text.substring(markerIndex, jsonEnd + 1);
-
-        try {
-            const normalizedJson = jsonStr.replace(/'/g, '"');
-            const data = JSON.parse(normalizedJson);
-
-            tags.push({
-                fullMatch: tagOnly,
-                index: markerIndex,
-                style: data.style || '',
-                prompt: data.prompt || '',
-                aspectRatio: data.aspect_ratio || data.aspectRatio || null,
-                imageSize: data.image_size || data.imageSize || null,
-                quality: data.quality || null,
-                isNewFormat: false
-            });
-
-            iigLog('INFO', `Found LEGACY format tag: ${data.prompt?.substring(0, 50)}`);
-        } catch (e) {
-            iigLog('WARN', `Failed to parse legacy tag JSON: ${jsonStr.substring(0, 100)}`, e.message);
-        }
-
-        searchStart = jsonEnd + 1;
     }
 
     return tags;
@@ -1304,6 +1422,11 @@ function createErrorPlaceholder(tagId, errorMessage, tagInfo) {
         const instructionMatch = tagInfo.fullMatch.match(/data-iig-instruction\s*=\s*(['"])([\s\S]*?)\1/i);
         if (instructionMatch) {
             img.setAttribute('data-iig-instruction', instructionMatch[2]);
+            } else if (tagInfo.fullMatchDecoded) {
+            const decodedMatch = tagInfo.fullMatchDecoded.match(/data-iig-instruction\s*=\s*(['"])([\s\S]*?)\1/i);
+            if (decodedMatch) {
+                img.setAttribute('data-iig-instruction', decodedMatch[2]);
+            }
         }
     }
 
@@ -1316,7 +1439,14 @@ async function processMessageTags(messageId) {
 
     if (!settings.enabled) return;
 
-    // FIX: Check both active processing AND already completed processing
+    // [FIX-I] Debounce: prevent rapid re-entry for same messageId
+    const now = Date.now();
+    const lastProcessed = messageDebounceMap.get(messageId);
+    if (lastProcessed && (now - lastProcessed) < DEBOUNCE_MS) {
+        iigLog('INFO', `Message ${messageId} debounced (${now - lastProcessed}ms since last attempt)`);
+        return;
+    }
+
     if (processingMessages.has(messageId)) {
         iigLog('WARN', `Message ${messageId} is already being processed, skipping`);
         return;
@@ -1330,16 +1460,36 @@ async function processMessageTags(messageId) {
     const message = context.chat[messageId];
     if (!message || message.is_user) return;
 
-    const tags = await parseImageTags(message.mes, { checkExistence: true });
+    messageDebounceMap.set(messageId, now);
+
+    // [FIX-D] Try parsing message.mes first, then fall back to DOM innerHTML
+    let tags = await parseImageTags(message.mes, { checkExistence: true });
+
+    if (tags.length === 0) {
+        iigLog('INFO', 'No tags found in message.mes, trying DOM innerHTML as fallback...');
+        const messageElement = document.querySelector(`#chat .mes[mesid="${messageId}"]`);
+        if (messageElement) {
+            const mesTextEl = messageElement.querySelector('.mes_text');
+            if (mesTextEl) {
+                const domHtml = mesTextEl.innerHTML;
+                tags = await parseImageTags(domHtml, { checkExistence: true });
+                if (tags.length > 0) {
+                    iigLog('INFO', `Found ${tags.length} tag(s) in DOM innerHTML (missed in message.mes due to HTML encoding)`);
+                }
+            }
+        }
+    }
+
     iigLog('INFO', `parseImageTags returned: ${tags.length} tags`);
     if (tags.length > 0) {
         iigLog('INFO', `First tag: ${JSON.stringify(tags[0]).substring(0, 200)}`);
     }
+
     if (tags.length === 0) {
         iigLog('INFO', 'No tags found by parser');
-        // FIX: Mark as processed even if no tags found, to prevent re-entry
-        // after DOM changes triggered by other code
-        processedMessages.add(messageId);
+        // [FIX-E] Do NOT mark as processed when 0 tags found.
+        // This allows re-processing if the DOM updates later with decoded content.
+        // The debounce map prevents rapid re-entry.
         return;
     }
 
@@ -1371,31 +1521,32 @@ async function processMessageTags(messageId) {
         let targetElement = null;
 
         if (tag.isNewFormat) {
+            // [FIX-F] Multiple fallback strategies for finding the target img element
             const allImgs = mesTextEl.querySelectorAll('img[data-iig-instruction]');
             iigLog('INFO', `Searching for img element. Found ${allImgs.length} img[data-iig-instruction] elements in DOM`);
 
             const searchPrompt = tag.prompt.substring(0, 30);
             iigLog('INFO', `Searching for prompt starting with: "${searchPrompt}"`);
 
+            // Strategy 1: Match by instruction content (decoded)
             for (const img of allImgs) {
+                if (img.dataset.iigProcessed === 'true') continue; // [FIX-H] skip already processed
                 const instruction = img.getAttribute('data-iig-instruction');
                 const src = img.getAttribute('src') || '';
                 iigLog('INFO', `DOM img - src: "${src.substring(0, 50)}", instruction (first 100): "${instruction?.substring(0, 100)}"`);
 
                 if (instruction) {
-                    const decodedInstruction = instruction
+                    const decodedInstruction = decodeHtmlEntities(instruction)
                         .replace(/\u201c/g, '"')
                         .replace(/\u2018/g, "'")
                         .replace(/\u2019/g, "'")
-                        .replace(/\u201d/g, '"')
-                        .replace(/&amp;/g, '&');
+                        .replace(/\u201d/g, '"');
 
                     const normalizedSearchPrompt = searchPrompt
                         .replace(/\u201c/g, '"')
                         .replace(/\u2018/g, "'")
                         .replace(/\u2019/g, "'")
-                        .replace(/\u201d/g, '"')
-                        .replace(/&amp;/g, '&');
+                        .replace(/\u201d/g, '"');
 
                     if (decodedInstruction.includes(normalizedSearchPrompt)) {
                         iigLog('INFO', `Found img element via decoded instruction match`);
@@ -1423,11 +1574,13 @@ async function processMessageTags(messageId) {
                 }
             }
 
+            // Strategy 2: Match by src marker
             if (!targetElement) {
                 iigLog('INFO', `Prompt matching failed, trying src marker matching...`);
                 for (const img of allImgs) {
+                    if (img.dataset.iigProcessed === 'true') continue;
                     const src = img.getAttribute('src') || '';
-                    if (src.includes('[IMG:GEN]') || src.includes('[IMG:ERROR]') || src === '' || src === '#') {
+                    if (src.includes('[IMG:GEN]') || src.includes('[IMG:ERROR]') || src.includes('error.svg') || src === '' || src === '#') {
                         iigLog('INFO', `Found img element with generation marker in src: "${src}"`);
                         targetElement = img;
                         break;
@@ -1435,31 +1588,57 @@ async function processMessageTags(messageId) {
                 }
             }
 
+            // Strategy 3: Broader search across all imgs in message
             if (!targetElement) {
                 iigLog('INFO', `Trying broader img search...`);
                 const allImgsInMes = mesTextEl.querySelectorAll('img');
                 for (const img of allImgsInMes) {
+                    if (img.dataset.iigProcessed === 'true') continue;
                     const src = img.getAttribute('src') || '';
-                    if (src.includes('[IMG:GEN]') || src.includes('[IMG:ERROR]')) {
+                    if (src.includes('[IMG:GEN]') || src.includes('[IMG:ERROR]') || src.includes('error.svg')) {
                         iigLog('INFO', `Found img via broad search with marker src: "${src.substring(0, 50)}"`);
                         targetElement = img;
                         break;
                     }
                 }
             }
+
+            // Strategy 4: Any img with data-iig-instruction that doesn't have a valid path
+            if (!targetElement) {
+                iigLog('INFO', `Trying any unprocessed iig img...`);
+                for (const img of allImgs) {
+                    if (img.dataset.iigProcessed === 'true') continue;
+                    const src = img.getAttribute('src') || '';
+                    // If src doesn't start with /user/images/ it's not a successfully generated image
+                    if (!src.startsWith('/user/images/')) {
+                        iigLog('INFO', `Found unprocessed iig img with src: "${src.substring(0, 50)}"`);
+                        targetElement = img;
+                        break;
+                    }
+                }
+            }
         } else {
-            const tagEscaped = tag.fullMatch
-                .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-                .replace(/\u201c/g, '(?:\u201c|")');
-            const tagRegex = new RegExp(tagEscaped, 'g');
+            // Legacy format: [IMG:GEN:{...}]
+            // [FIX-L] Safely create placeholder without regex on fullMatch
+            const placeholderSpan = `<span data-iig-placeholder="${tagId}"></span>`;
+            const currentHtml = mesTextEl.innerHTML;
 
-            const beforeReplace = mesTextEl.innerHTML;
-            mesTextEl.innerHTML = mesTextEl.innerHTML.replace(
-                tagRegex,
-                `<span data-iig-placeholder="${tagId}"></span>`
-            );
+            // Try direct string replacement first (faster and safer than regex)
+            let newHtml = currentHtml.replace(tag.fullMatch, placeholderSpan);
 
-            if (beforeReplace !== mesTextEl.innerHTML) {
+            // [FIX-G] If direct replace failed, try decoded version
+            if (newHtml === currentHtml && tag.fullMatchDecoded && tag.fullMatchDecoded !== tag.fullMatch) {
+                newHtml = currentHtml.replace(tag.fullMatchDecoded, placeholderSpan);
+            }
+
+            // [FIX-G] If still failed, try HTML-entity-encoded version
+            if (newHtml === currentHtml) {
+                const encodedMatch = sanitizeForHtml(tag.fullMatch);
+                newHtml = currentHtml.replace(encodedMatch, placeholderSpan);
+            }
+
+            if (newHtml !== currentHtml) {
+                mesTextEl.innerHTML = newHtml;
                 targetElement = mesTextEl.querySelector(`[data-iig-placeholder="${tagId}"]`);
                 iigLog('INFO', `Legacy tag replaced with placeholder span`);
             }
@@ -1477,6 +1656,9 @@ async function processMessageTags(messageId) {
         }
 
         if (targetElement) {
+            // [FIX-H] Mark element as being processed
+            targetElement.dataset.iigProcessed = 'true';
+
             const parent = targetElement.parentElement;
             if (parent) {
                 const parentStyle = window.getComputedStyle(parent);
@@ -1497,11 +1679,11 @@ async function processMessageTags(messageId) {
             const dataUrl = await generateImageWithRetry(
                 tag.prompt,
                 tag.style,
-                (status) => { statusEl.textContent = status; },
+                (status) => { if (statusEl) statusEl.textContent = status; },
                 { aspectRatio: tag.aspectRatio, imageSize: tag.imageSize, quality: tag.quality }
             );
 
-            statusEl.textContent = 'Сохранение...';
+            if (statusEl) statusEl.textContent = 'Сохранение...';
             const imagePath = await saveImageToFile(dataUrl);
 
             const img = document.createElement('img');
@@ -1509,22 +1691,58 @@ async function processMessageTags(messageId) {
             img.src = imagePath;
             img.alt = tag.prompt;
             img.title = `Style: ${tag.style}\nPrompt: ${tag.prompt}`;
+            img.dataset.iigProcessed = 'true';
 
             if (tag.isNewFormat) {
                 const instructionMatch = tag.fullMatch.match(/data-iig-instruction\s*=\s*(['"])([\s\S]*?)\1/i);
                 if (instructionMatch) {
                     img.setAttribute('data-iig-instruction', instructionMatch[2]);
+                } else if (tag.fullMatchDecoded) {
+                    const decodedMatch = tag.fullMatchDecoded.match(/data-iig-instruction\s*=\s*(['"])([\s\S]*?)\1/i);
+                    if (decodedMatch) {
+                        img.setAttribute('data-iig-instruction', decodedMatch[2]);
+                    }
                 }
             }
 
             loadingPlaceholder.replaceWith(img);
 
+            // [FIX-G] Update message.mes with generated path — try multiple replace strategies
             if (tag.isNewFormat) {
                 const updatedTag = tag.fullMatch.replace(/src\s*=\s*(['"])[^'"]*\1/i, `src="${imagePath}"`);
-                message.mes = message.mes.replace(tag.fullMatch, updatedTag);
+                let newMes = message.mes.replace(tag.fullMatch, updatedTag);
+
+                // Fallback: try decoded version
+                if (newMes === message.mes && tag.fullMatchDecoded && tag.fullMatchDecoded !== tag.fullMatch) {
+                    const updatedTagDecoded = tag.fullMatchDecoded.replace(/src\s*=\s*(['"])[^'"]*\1/i, `src="${imagePath}"`);
+                    newMes = message.mes.replace(tag.fullMatchDecoded, updatedTagDecoded);
+                }
+
+                // Fallback: try replacing just the src attribute value
+                if (newMes === message.mes) {
+                    iigLog('WARN', 'Full tag replace failed, trying src-only replace');
+                    const promptSnippet = tag.prompt.substring(0, 40);
+                    // Find the img tag containing this prompt and replace its src
+                    const srcReplaceRegex = new RegExp(
+                        `(data-iig-instruction\\s*=\\s*['"][^'"]*${promptSnippet.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[^'"]*['"][^>]*?)src\\s*=\\s*(['"])[^'"]*\\2`,
+                        'i'
+                    );
+                    newMes = message.mes.replace(srcReplaceRegex, `$1src="${imagePath}"`);
+                }
+
+                if (newMes !== message.mes) {
+                    message.mes = newMes;
+                    iigLog('INFO', 'Updated message.mes with new image path');
+                } else {
+                    iigLog('WARN', 'Could not update message.mes (tag not found for replace). Image is shown in DOM but mes not updated.');
+                }
             } else {
                 const completionMarker = `[IMG:\u2713:${imagePath}]`;
-                message.mes = message.mes.replace(tag.fullMatch, completionMarker);
+                let newMes = message.mes.replace(tag.fullMatch, completionMarker);
+                if (newMes === message.mes && tag.fullMatchDecoded) {
+                    newMes = message.mes.replace(tag.fullMatchDecoded, completionMarker);
+                }
+                message.mes = newMes;
             }
 
             iigLog('INFO', `Successfully generated image for tag ${index}`);
@@ -1538,10 +1756,19 @@ async function processMessageTags(messageId) {
 
             if (tag.isNewFormat) {
                 const errorTag = tag.fullMatch.replace(/src\s*=\s*(['"])[^'"]*\1/i, `src="${ERROR_IMAGE_PATH}"`);
-                message.mes = message.mes.replace(tag.fullMatch, errorTag);
+                let newMes = message.mes.replace(tag.fullMatch, errorTag);
+                if (newMes === message.mes && tag.fullMatchDecoded) {
+                    const errorTagDecoded = tag.fullMatchDecoded.replace(/src\s*=\s*(['"])[^'"]*\1/i, `src="${ERROR_IMAGE_PATH}"`);
+                    newMes = message.mes.replace(tag.fullMatchDecoded, errorTagDecoded);
+                }
+                message.mes = newMes;
             } else {
                 const errorMarker = `[IMG:ERROR:${error.message.substring(0, 50)}]`;
-                message.mes = message.mes.replace(tag.fullMatch, errorMarker);
+                let newMes = message.mes.replace(tag.fullMatch, errorMarker);
+                if (newMes === message.mes && tag.fullMatchDecoded) {
+                    newMes = message.mes.replace(tag.fullMatchDecoded, errorMarker);
+                }
+                message.mes = newMes;
             }
             iigLog('INFO', `Marked tag as failed in message.mes`);
 
@@ -1555,20 +1782,18 @@ async function processMessageTags(messageId) {
         iigLog('ERROR', `Unexpected error processing tags for message ${messageId}:`, err.message);
     }
 
-    // FIX 4: only mark processed if ALL tags succeeded
+    // Only mark processed if ALL tags succeeded
     if (_failedTags === 0) {
         processedMessages.add(messageId);
     } else {
-        iigLog('WARN', `${_failedTags}/${tags.length} tag(s) failed — NOT marking ${messageId} as processed, will retry`);
+        iigLog('WARN', `${_failedTags}/${tags.length} tag(s) failed. NOT marking ${messageId} as processed, will allow retry.`);
     }
     await context.saveChat();
     processingMessages.delete(messageId);
 
-    // FIX: REMOVED the call to context.messageFormatting() + mesTextEl.innerHTML assignment.
-    // That was the ROOT CAUSE of the infinite recursion:
-    // messageFormatting -> innerHTML change -> CHARACTER_MESSAGE_RENDERED event
-    // -> onMessageReceived -> processMessageTags -> messageFormatting -> ...
-    // The DOM is already correctly updated by replaceWith() calls above.
+    // NOTE: We do NOT call messageFormatting() or set innerHTML here.
+    // That was the ROOT CAUSE of infinite recursion in the original code.
+    // DOM is already correctly updated by replaceWith() calls above.
 
     iigLog('INFO', `Finished processing message ${messageId}`);
 }
@@ -1585,14 +1810,33 @@ async function regenerateMessageImages(messageId) {
     const tags = await parseImageTags(message.mes, { forceAll: true });
 
     if (tags.length === 0) {
+        // [FIX-D] Also try DOM innerHTML for regen
+        const messageElement = document.querySelector(`#chat .mes[mesid="${messageId}"]`);
+        if (messageElement) {
+            const mesTextEl = messageElement.querySelector('.mes_text');
+            if (mesTextEl) {
+                const domTags = await parseImageTags(mesTextEl.innerHTML, { forceAll: true });
+                if (domTags.length > 0) {
+                    iigLog('INFO', `Found ${domTags.length} tags in DOM for regeneration`);
+                    // Use domTags below
+                    return await regenerateMessageImagesWithTags(messageId, domTags);
+                }
+            }
+        }
         toastr.warning('Нет тегов для перегенерации', 'Генерация картинок');
         return;
     }
 
+    return await regenerateMessageImagesWithTags(messageId, tags);
+}
+
+async function regenerateMessageImagesWithTags(messageId, tags) {
+    const context = SillyTavern.getContext();
+    const message = context.chat[messageId];
+
     iigLog('INFO', `Regenerating ${tags.length} images in message ${messageId}`);
     toastr.info(`Перегенерация ${tags.length} картинок...`, 'Генерация картинок');
 
-    // FIX: Remove from processedMessages so it can be marked again after regen
     processedMessages.delete(messageId);
     processingMessages.add(messageId);
 
@@ -1608,44 +1852,86 @@ async function regenerateMessageImages(messageId) {
         return;
     }
 
+    // [FIX-H] Collect all iig imgs and process them by index
+    const allIigImgs = Array.from(mesTextEl.querySelectorAll('img[data-iig-instruction]'));
+    const errorImgs = Array.from(mesTextEl.querySelectorAll('img.iig-error-image'));
+    const generatedImgs = Array.from(mesTextEl.querySelectorAll('img.iig-generated-image'));
+    const candidateImgs = [...allIigImgs, ...errorImgs, ...generatedImgs];
+
+    // Deduplicate
+    const uniqueImgs = [];
+    const seen = new Set();
+    for (const img of candidateImgs) {
+        if (!seen.has(img)) {
+            seen.add(img);
+            uniqueImgs.push(img);
+        }
+    }
+
     for (let index = 0; index < tags.length; index++) {
         const tag = tags[index];
         const tagId = `iig-regen-${messageId}-${index}`;
 
         try {
-            const existingImg = mesTextEl.querySelector(`img[data-iig-instruction]`);
-            if (existingImg) {
-                const instruction = existingImg.getAttribute('data-iig-instruction');
+            // Find the img to replace — prefer matching by index
+            let targetImg = uniqueImgs[index] || null;
 
-                const loadingPlaceholder = createLoadingPlaceholder(tagId);
-                existingImg.replaceWith(loadingPlaceholder);
-
-                const statusEl = loadingPlaceholder.querySelector('.iig-status');
-
-                const dataUrl = await generateImageWithRetry(
-                    tag.prompt,
-                    tag.style,
-                    (status) => { statusEl.textContent = status; },
-                    { aspectRatio: tag.aspectRatio, imageSize: tag.imageSize, quality: tag.quality }
-                );
-
-                statusEl.textContent = 'Сохранение...';
-                const imagePath = await saveImageToFile(dataUrl);
-
-                const img = document.createElement('img');
-                img.className = 'iig-generated-image';
-                img.src = imagePath;
-                img.alt = tag.prompt;
-                if (instruction) {
-                    img.setAttribute('data-iig-instruction', instruction);
+            // If not found by index, try matching by prompt
+            if (!targetImg) {
+                const searchPrompt = tag.prompt.substring(0, 30);
+                for (const img of uniqueImgs) {
+                    const instruction = img.getAttribute('data-iig-instruction') || '';
+                    if (instruction.includes(searchPrompt)) {
+                        targetImg = img;
+                        break;
+                    }
                 }
-                loadingPlaceholder.replaceWith(img);
-
-                const updatedTag = tag.fullMatch.replace(/src\s*=\s*(['"])[^'"]*\1/i, `src="${imagePath}"`);
-                message.mes = message.mes.replace(tag.fullMatch, updatedTag);
-
-                toastr.success(`Картинка ${index + 1}/${tags.length} готова`, 'Генерация картинок', { timeOut: 2000 });
             }
+
+            if (!targetImg) {
+                iigLog('WARN', `No img element found for regen tag ${index}, skipping`);
+                continue;
+            }
+
+            const instruction = targetImg.getAttribute('data-iig-instruction');
+
+            const loadingPlaceholder = createLoadingPlaceholder(tagId);
+            targetImg.replaceWith(loadingPlaceholder);
+
+            const statusEl = loadingPlaceholder.querySelector('.iig-status');
+
+            const dataUrl = await generateImageWithRetry(
+                tag.prompt,
+                tag.style,
+                (status) => { if (statusEl) statusEl.textContent = status; },
+                { aspectRatio: tag.aspectRatio, imageSize: tag.imageSize, quality: tag.quality }
+            );
+
+            if (statusEl) statusEl.textContent = 'Сохранение...';
+            const imagePath = await saveImageToFile(dataUrl);
+
+            const img = document.createElement('img');
+            img.className = 'iig-generated-image';
+            img.src = imagePath;
+            img.alt = tag.prompt;
+            img.dataset.iigProcessed = 'true';
+            if (instruction) {
+                img.setAttribute('data-iig-instruction', instruction);
+            }
+            loadingPlaceholder.replaceWith(img);
+
+            // Update message.mes
+            if (tag.isNewFormat) {
+                const updatedTag = tag.fullMatch.replace(/src\s*=\s*(['"])[^'"]*\1/i, `src="${imagePath}"`);
+                let newMes = message.mes.replace(tag.fullMatch, updatedTag);
+                if (newMes === message.mes && tag.fullMatchDecoded) {
+                    const updatedTagDecoded = tag.fullMatchDecoded.replace(/src\s*=\s*(['"])[^'"]*\1/i, `src="${imagePath}"`);
+                    newMes = message.mes.replace(tag.fullMatchDecoded, updatedTagDecoded);
+                }
+                message.mes = newMes;
+            }
+
+            toastr.success(`Картинка ${index + 1}/${tags.length} готова`, 'Генерация картинок', { timeOut: 2000 });
         } catch (error) {
             iigLog('ERROR', `Regeneration failed for tag ${index}:`, error.message);
             toastr.error(`Ошибка: ${error.message}`, 'Генерация картинок');
@@ -1700,6 +1986,13 @@ function addButtonsToExistingMessages() {
 }
 
 async function onMessageReceived(messageId) {
+    // [FIX-B] Normalize messageId to integer
+    messageId = typeof messageId === 'string' ? parseInt(messageId, 10) : messageId;
+    if (isNaN(messageId)) {
+        iigLog('WARN', `Invalid messageId received: ${messageId}`);
+        return;
+    }
+
     iigLog('INFO', `onMessageReceived: ${messageId}`);
 
     const settings = getSettings();
@@ -1708,7 +2001,7 @@ async function onMessageReceived(messageId) {
         return;
     }
 
-    // FIX 5: event fires before DOM element exists — retry with delays
+    // [FIX-5 + improvement] Event fires before DOM element exists — retry with delays
     let messageElement = document.querySelector(`#chat .mes[mesid="${messageId}"]`);
     if (!messageElement) {
         let _found = false;
@@ -1765,7 +2058,8 @@ function renderNpcList() {
         preview.style.flexShrink = '0';
         if (npc.imageData) {
             const img = document.createElement('img');
-            img.src = `data:image/jpeg;base64,${npc.imageData}`;
+            const _npcMime = detectMimeType(npc.imageData);
+            img.src = `data:${_npcMime};base64,${npc.imageData}`;
             img.style.width = '100%';
             img.style.height = '100%';
             img.style.objectFit = 'cover';
@@ -1859,7 +2153,8 @@ function renderStyleRefList() {
         preview.style.border = '1px solid rgba(255,182,193,0.15)';
         if (styleRef.imageData) {
             const img = document.createElement('img');
-            img.src = `data:image/jpeg;base64,${styleRef.imageData}`;
+            const _styleMime = detectMimeType(styleRef.imageData);
+            img.src = `data:${_styleMime};base64,${styleRef.imageData}`;
             img.style.width = '100%';
             img.style.height = '100%';
             img.style.objectFit = 'cover';
@@ -1935,7 +2230,7 @@ function renderAvatarDropdown(avatars = []) {
         thumb.className = 'iig-item-thumb';
         thumb.src = `/User Avatars/${encodeURIComponent(avatarFile)}`;
         thumb.alt = avatarFile;
-        thumb.loading = 'lazy';
+                thumb.loading = 'lazy';
         thumb.onerror = function () {
             this.style.display = 'none';
         };
@@ -2125,21 +2420,21 @@ function createSettingsUI() {
                     </label>
 
                     <div id="iig_user_avatar_row" class="flex-row ${!settings.sendUserAvatar ? 'hidden' : ''}" style="margin-top: 5px; align-items: center;">
-    <label>Файл аватара</label>
-    <div id="iig_avatar_dropdown" class="iig-avatar-dropdown">
-        <div id="iig_avatar_dropdown_selected" class="iig-avatar-dropdown-selected">
-            ${settings.userAvatarFile
-            ? `<img class="iig-dropdown-thumb" src="/User Avatars/${encodeURIComponent(settings.userAvatarFile)}" alt="" onerror="this.style.display='none'">`
-            : '<div class="iig-dropdown-placeholder"><i class="fa-solid fa-user"></i></div>'}
-            <span class="iig-dropdown-text">${settings.userAvatarFile || '-- Не выбран --'}</span>
-            <span class="iig-dropdown-arrow fa-solid fa-chevron-down"></span>
-        </div>
-        <div id="iig_avatar_dropdown_list" class="iig-avatar-dropdown-list"></div>
-    </div>
-    <div id="iig_refresh_avatars" class="menu_button iig-refresh-btn" title="Обновить список">
-        <i class="fa-solid fa-sync"></i>
-    </div>
-</div>
+                        <label>Файл аватара</label>
+                        <div id="iig_avatar_dropdown" class="iig-avatar-dropdown">
+                            <div id="iig_avatar_dropdown_selected" class="iig-avatar-dropdown-selected">
+                                ${settings.userAvatarFile
+                                    ? `<img class="iig-dropdown-thumb" src="/User Avatars/${encodeURIComponent(settings.userAvatarFile)}" alt="" onerror="this.style.display='none'">`
+                                    : '<div class="iig-dropdown-placeholder"><i class="fa-solid fa-user"></i></div>'}
+                                <span class="iig-dropdown-text">${settings.userAvatarFile || '-- Не выбран --'}</span>
+                                <span class="iig-dropdown-arrow fa-solid fa-chevron-down"></span>
+                            </div>
+                            <div id="iig_avatar_dropdown_list" class="iig-avatar-dropdown-list"></div>
+                        </div>
+                        <div id="iig_refresh_avatars" class="menu_button iig-refresh-btn" title="Обновить список">
+                            <i class="fa-solid fa-sync"></i>
+                        </div>
+                    </div>
 
                     <div id="iig_user_name_row" class="flex-row ${!settings.sendUserAvatar ? 'hidden' : ''}" style="margin-top: 5px;">
                         <label for="iig_user_char_name">Имя в промптах</label>
@@ -2429,7 +2724,7 @@ function bindSettingsEvents() {
         const name = nameInput?.value?.trim();
 
         if (!name) {
-                        toastr.warning('Введите имя NPC', 'NPC');
+            toastr.warning('Введите имя NPC', 'NPC');
             return;
         }
 
@@ -2517,6 +2812,7 @@ function bindSettingsEvents() {
     document.getElementById('iig_export_logs')?.addEventListener('click', () => {
         exportLogs();
     });
+
     document.getElementById('iig_preset_save')?.addEventListener('click', () => {
         const nameInput = document.getElementById('iig_preset_new_name');
         const name = nameInput?.value?.trim();
@@ -2526,7 +2822,6 @@ function bindSettingsEvents() {
         }
     });
 
-    // Enter по полю ввода тоже сохраняет
     document.getElementById('iig_preset_new_name')?.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') {
             e.preventDefault();
@@ -2538,6 +2833,10 @@ function bindSettingsEvents() {
     renderNpcList();
     renderStyleRefList();
 }
+
+// ============================================================
+// INITIALIZATION
+// ============================================================
 
 (function init() {
     const context = SillyTavern.getContext();
@@ -2556,36 +2855,73 @@ function bindSettingsEvents() {
 
     context.eventSource.on(context.event_types.CHAT_CHANGED, () => {
         iigLog('INFO', 'CHAT_CHANGED event - clearing processed cache and adding buttons');
-        // FIX: Clear processedMessages when chat changes so images in new chat can be processed
         processedMessages.clear();
         processingMessages.clear();
+        messageDebounceMap.clear(); // [FIX-I] Also clear debounce map on chat change
         setTimeout(() => {
             addButtonsToExistingMessages();
         }, 100);
         setTimeout(updateCharAvatarPreview, 200);
     });
 
+    // [FIX-B] Normalize messageId in handler (handles both string and number from different ST versions)
     const handleMessage = async (messageId) => {
-        console.log('[IIG] Event triggered for message:', messageId);
-        await onMessageReceived(messageId);
+        const normalizedId = typeof messageId === 'string' ? parseInt(messageId, 10) : messageId;
+        if (isNaN(normalizedId)) {
+            iigLog('WARN', `handleMessage received invalid messageId: ${messageId}`);
+            return;
+        }
+        console.log('[IIG] Event triggered for message:', normalizedId);
+        await onMessageReceived(normalizedId);
     };
 
-    context.eventSource.makeLast(context.event_types.CHARACTER_MESSAGE_RENDERED, handleMessage);
+    // [FIX-A] makeLast() may not exist on all ST versions — wrap in try/catch with fallback
+    try {
+        if (typeof context.eventSource.makeLast === 'function') {
+            context.eventSource.makeLast(context.event_types.CHARACTER_MESSAGE_RENDERED, handleMessage);
+            iigLog('INFO', 'Subscribed to CHARACTER_MESSAGE_RENDERED via makeLast()');
+        } else {
+            throw new Error('makeLast not available');
+        }
+    } catch (e) {
+        iigLog('WARN', `makeLast() failed (${e.message}), falling back to on()`);
+        context.eventSource.on(context.event_types.CHARACTER_MESSAGE_RENDERED, handleMessage);
+        iigLog('INFO', 'Subscribed to CHARACTER_MESSAGE_RENDERED via on() fallback');
+    }
 
-    // FIX 6: Subscribe to MESSAGE_SWIPED — fires when user rerolls a message.
+    // [FIX-6] Subscribe to MESSAGE_SWIPED — fires when user rerolls/swipes a message.
     // Must clear processedMessages for that messageId so the new swipe content gets processed.
     if (context.event_types.MESSAGE_SWIPED) {
         context.eventSource.on(context.event_types.MESSAGE_SWIPED, async (messageId) => {
-            iigLog('INFO', `MESSAGE_SWIPED: ${messageId} — clearing cache and processing`);
-            processedMessages.delete(messageId);
-            processingMessages.delete(messageId);
-            await onMessageReceived(messageId);
+            const normalizedId = typeof messageId === 'string' ? parseInt(messageId, 10) : messageId;
+            iigLog('INFO', `MESSAGE_SWIPED: ${normalizedId} — clearing cache and processing`);
+            processedMessages.delete(normalizedId);
+            processingMessages.delete(normalizedId);
+            messageDebounceMap.delete(normalizedId); // [FIX-I] Clear debounce too
+            await onMessageReceived(normalizedId);
         });
+        iigLog('INFO', 'Subscribed to MESSAGE_SWIPED');
+    } else {
+        iigLog('WARN', 'MESSAGE_SWIPED event type not found in this ST version');
     }
 
-    // Also handle CHARACTER_MESSAGE_RENDERED for swipes (some ST versions use this for both)
-    // processedMessages.delete is safe to call multiple times
+    // [FIX-J] Also listen for MESSAGE_RECEIVED as a safety net (some ST versions emit this instead)
+    if (context.event_types.MESSAGE_RECEIVED) {
+        context.eventSource.on(context.event_types.MESSAGE_RECEIVED, async (messageId) => {
+            const normalizedId = typeof messageId === 'string' ? parseInt(messageId, 10) : messageId;
+            if (isNaN(normalizedId)) return;
+            // Only process if not already handled by CHARACTER_MESSAGE_RENDERED
+            if (!processingMessages.has(normalizedId) && !processedMessages.has(normalizedId)) {
+                iigLog('INFO', `MESSAGE_RECEIVED fallback triggered for: ${normalizedId}`);
+                // Small delay to let CHARACTER_MESSAGE_RENDERED fire first if it will
+                await new Promise(r => setTimeout(r, 500));
+                if (!processingMessages.has(normalizedId) && !processedMessages.has(normalizedId)) {
+                    await onMessageReceived(normalizedId);
+                }
+            }
+        });
+        iigLog('INFO', 'Subscribed to MESSAGE_RECEIVED as safety net');
+    }
 
     console.log('[IIG] Inline Image Generation extension initialized');
 })();
-
